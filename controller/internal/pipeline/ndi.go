@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -22,35 +20,17 @@ type NDISource struct {
 	HostName   *string `json:"host_name"`
 }
 
-// ndiEnvDir returns the uv project directory used to run the NDI bridge.
-// Override with BOOTH_NDI_ENV_DIR (default: $HOME/utone-ndi-utils).
-func ndiEnvDir() string {
-	if dir := os.Getenv("BOOTH_NDI_ENV_DIR"); dir != "" {
-		return dir
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "utone-ndi-utils")
-}
-
-// ndiBridgeScript returns the path of ndi_bridge.py.
-// Override with BOOTH_NDI_BRIDGE_SCRIPT (default: controller/scripts/ndi_bridge.py relative to the repository root).
-func ndiBridgeScript() string {
-	if p := os.Getenv("BOOTH_NDI_BRIDGE_SCRIPT"); p != "" {
-		return p
-	}
-	abs, err := filepath.Abs(filepath.Join("controller", "scripts", "ndi_bridge.py"))
-	if err != nil {
-		return filepath.Join("controller", "scripts", "ndi_bridge.py")
-	}
-	return abs
-}
+// The NDI bridge is run with the uv project (.venv) at the repository root
+// ("uv run --project ."), so the controller must be started from the repository root.
+// Run "make setup-python" once to create the virtual environment.
+const ndiBridgeScript = "controller/scripts/ndi_bridge.py"
 
 // DiscoverNDISources runs the Python ndi_bridge via uv to find active NDI senders on the network.
 func DiscoverNDISources() ([]NDISource, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "uv", "run", "--directory", ndiEnvDir(), "python", ndiBridgeScript(), "--discover")
+	cmd := exec.CommandContext(ctx, "uv", "run", "--project", ".", "python", ndiBridgeScript, "--discover")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover NDI sources: %w", err)
@@ -103,8 +83,8 @@ func (d *NDIDistributor) Start() error {
 		fps = 30
 	}
 
-	cmd := exec.CommandContext(ctx, "uv", "run", "--directory", ndiEnvDir(), "python",
-		ndiBridgeScript(),
+	cmd := exec.CommandContext(ctx, "uv", "run", "--project", ".", "python",
+		ndiBridgeScript,
 		"--source", d.sourceName,
 		"--width", fmt.Sprintf("%d", d.canvas.Width),
 		"--height", fmt.Sprintf("%d", d.canvas.Height),
