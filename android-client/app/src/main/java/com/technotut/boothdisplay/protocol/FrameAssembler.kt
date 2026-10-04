@@ -19,15 +19,21 @@ class FrameAssembler(
     private var fragmentLengths = IntArray(128)
 
     fun onPacket(header: PacketHeader, payload: ByteArray, offset: Int, length: Int) {
-        val ts = header.timestamp
-
-        // New frame started
-        if (ts != currentTimestamp) {
-            // Discard previous incomplete frame
-            reset(ts, header.fragmentTotal, header.isKeyframe)
+        // Single packet NALU (not fragmented)
+        if (header.fragmentTotal <= 1) {
+            val completeFrame = ByteArray(length)
+            System.arraycopy(payload, offset, completeFrame, 0, length)
+            onFrameComplete(completeFrame, header.isKeyframe, header.timestamp)
+            return
         }
 
-        val idx = header.fragmentIndex
+        // Fragmented NALU: calculate base sequence number for this NALU
+        val seqBase = (header.sequenceNumber - header.fragmentIndex).toLong()
+        if (seqBase != currentTimestamp) {
+            reset(seqBase, header.fragmentTotal.toInt(), header.isKeyframe)
+        }
+
+        val idx = header.fragmentIndex.toInt()
         if (idx in 0 until expectedFragments) {
             if (fragmentBuffers[idx] == null || fragmentBuffers[idx]!!.size < length) {
                 fragmentBuffers[idx] = ByteArray(length)
@@ -37,9 +43,9 @@ class FrameAssembler(
             receivedFragments++
         }
 
-        // Check if all fragments arrived or last marker received
+        // Check if all fragments arrived
         if (receivedFragments == expectedFragments && expectedFragments > 0) {
-            assembleAndEmit()
+            assembleAndEmit(header.timestamp)
         }
     }
 
@@ -55,7 +61,7 @@ class FrameAssembler(
         }
     }
 
-    private fun assembleAndEmit() {
+    private fun assembleAndEmit(timestamp: Long) {
         var totalBytes = 0
         for (i in 0 until expectedFragments) {
             totalBytes += fragmentLengths[i]
@@ -71,7 +77,7 @@ class FrameAssembler(
                     cursor += len
                 }
             }
-            onFrameComplete(completeFrame, isCurrentKeyframe, currentTimestamp)
+            onFrameComplete(completeFrame, isCurrentKeyframe, timestamp)
         }
 
         // Reset state
