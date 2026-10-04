@@ -6,11 +6,22 @@
 
 ## 1. 開発環境・必要ツール
 
-- Go: 1.22 以上 (本環境: Go 1.26+)
-- Node.js: v20 以上 (本環境: Node.js v22+)
+- Go: 1.26 以上 (`controller/go.mod` の `go 1.26.7` に準拠)
+- Node.js: v20 以上
 - uv: Python パッケージマネージャ
 - FFmpeg: libx264 有効ビルド
+- JDK 17 以上 / Android SDK (Android クライアントのビルド時)
 - NDI ライブラリ: cyndilib 仮想環境 (リポジトリ直下の `.venv`。`make setup-python` で作成)
+
+### Android クライアントの開発環境
+- JDK 17 以上、Android SDK (`platforms;android-34`、`build-tools;34.0.0`) が必要です。
+- SDK の場所は `android-client/local.properties` の `sdk.dir=...` (git 管理外) または環境変数 `ANDROID_HOME` で指定します。
+- ビルド: `cd android-client && ./gradlew assembleDebug` (出力: `app/build/outputs/apk/debug/app-debug.apk`)
+
+### クライアントシミュレータ
+- 実機なしで UDP ストリームを受信・デコードし、Web ブラウザで確認するツールです (`tools/simulator/client_simulator.py`)。
+- 依存 (`av` / `opencv-python` / `numpy`) はリポジトリ直下の `pyproject.toml` で管理され、`.venv` に作成されます。
+- 起動: `make run-simulator` (`make setup-python` を自動実行) → `http://localhost:9001`
 
 ---
 

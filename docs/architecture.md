@@ -18,7 +18,7 @@ flowchart TB
         subgraph MediaSources["入力ソース"]
             TestPattern["内蔵テストパターン"]
             VideoFile["ローカル動画ファイル (MP4)"]
-            NDISource["NDIネットワーク映像 (cyndilib / uv)"]
+            NDISource["NDIネットワーク映像 (cyndilib / uv: リポジトリ直下の .venv)"]
         end
 
         CanvasEngine["仮想キャンバス &<br/>クロップ分割エンジン"]
@@ -84,12 +84,12 @@ flowchart TB
   - 仮想キャンバスのトポロジー表示、ライブMJPEGプレビュー、クロップ枠オーバーレイ。
   - 設定テーブルからのIP、ポート、解像度、クロップ位置、ベゼル幅の動的編集と保存。
 - WebSocket制御チャンネル:
-  - クライアントおよびWeb-GUIとの双方向通信、毎秒のテレメトリ配信、再生同期コマンドの通知。
+  - クライアントおよびWeb-GUIとの双方向通信、毎秒のテレメトリ配信。
 
 ### (3) NDIブリッジ連携
 - `controller/scripts/ndi_bridge.py`:
   - Pythonの `cyndilib` を使用してNDIソースの自動検出およびフレーム受信を実行。
-  - コントローラ本体からは `uv run` 経由で呼び出し、キャンバス解像度にスケーリングされたrawvideoストリームをUNIXパイプ経由でGoパイプラインへ供給。
+  - コントローラ本体からはリポジトリ直下の uv プロジェクト (`pyproject.toml` / `.venv`、`make setup-python` で作成) を `uv run --project .` で参照して呼び出し (コントローラはリポジトリ直下から起動する必要がある)、キャンバス解像度にスケーリングされたrawvideoストリームをUNIXパイプ経由でGoパイプラインへ供給。
 
 ---
 
