@@ -113,8 +113,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 lastFpsCalculationTime = now
 
                 mainHandler.post {
-                    textStatus.text = "Receiving UDP Stream on :$listenPort"
-                    textMetrics.text = String.format("Render Rate: %.1f FPS | 1920x540 HW AVC", fps)
+                    textStatus.text = "UDP :$listenPort"
+                    textMetrics.text = String.format("%.1f FPS", fps)
                 }
             }
         }.apply {
