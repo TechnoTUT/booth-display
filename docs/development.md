@@ -10,7 +10,7 @@
 - Node.js: v20 以上 (本環境: Node.js v22+)
 - uv: Python パッケージマネージャ
 - FFmpeg: libx264 有効ビルド
-- NDI ライブラリ: cyndilib 仮想環境 (utone-ndi-utils/.venv 等)
+- NDI ライブラリ: cyndilib 仮想環境 (リポジトリ直下の `.venv`。`make setup-python` で作成)
 
 ---
 

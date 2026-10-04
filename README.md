@@ -90,16 +90,23 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 > リリース版 (`./gradlew assembleRelease`) は署名設定がないため、`app-release-unsigned.apk` が生成され、署名しないと端末にインストールできません。
 
+## Python 環境 (NDI ブリッジ / シミュレータ)
+
+NDI 入力 (`cyndilib`) とクライアントシミュレータ (`av`) の依存は、リポジトリ直下の `pyproject.toml` で管理され、`.venv` に作成されます。
+
+```bash
+make setup-python   # uv sync
+```
+
+コントローラはリポジトリ直下から起動してください (`uv run --project .` で `.venv` を参照します)。
+
 ## クライアントシミュレータ (tools/simulator/)
 
-実機がなくても、UDP で受信した H.264 ストリームをデコードして Web ブラウザ上で確認できます。Python の `av`、`opencv-python`、`numpy` が入った uv 環境が必要です (既定は `~/utone-ndi-utils`)。
+実機がなくても、UDP で受信した H.264 ストリームをデコードして Web ブラウザ上で確認できます。Python 環境はリポジトリ直下の `pyproject.toml` から `uv` で `.venv` として自動作成されます (`make setup-python`)。
 
 ```bash
 # display-1 (UDP :8554) のシミュレータを起動。ブラウザで http://localhost:9001 を開く
 make run-simulator
-
-# uv 環境の場所を変更する場合
-make run-simulator SIM_ENV_DIR=/path/to/uv-project
 ```
 
 ## 設定 (config.yaml)

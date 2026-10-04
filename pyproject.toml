@@ -1,0 +1,11 @@
+[project]
+name = "booth-display-tools"
+version = "0.1.0"
+description = "Python tools for booth-display (NDI bridge, client simulator)"
+requires-python = ">=3.10"
+dependencies = [
+    "cyndilib",
+    "numpy",
+    "opencv-python",
+    "av",
+]

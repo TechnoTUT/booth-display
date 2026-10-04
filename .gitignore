@@ -44,3 +44,7 @@ Thumbs.db
 *.mp4
 *.mkv
 *.mov
+
+# Python
+.venv/
+__pycache__/
