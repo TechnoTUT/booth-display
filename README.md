@@ -48,7 +48,7 @@ make dev-frontend    # フロントエンド開発サーバ起動 (Vite)
 
 ```bash
 # 通常起動
-bin/display-controller -config config.yaml
+./controller/bin/display-controller -config config.yaml
 
 # または make コマンドで起動
 make run
@@ -58,6 +58,22 @@ make run
 - Web-GUI ダッシュボード: `http://localhost:8080`
 
 ---
+
+## Androidクライアントアプリ (android-client/)
+
+LG Display LD290EJS-FPN1 (Android 7.1 / 1920x540) 上で動作する映像受信・表示アプリです。
+
+### 特徴
+- MediaCodec によるハードウェア H.264 デコード (SurfaceView 直接描画)
+- 1GB RAM 向け超省メモリ設計 (中間 Bitmap 不使用による OOM 完全防止)
+- イマーシブ全画面表示および端末起動時自動起動 (BOOT_COMPLETED)
+
+### ビルド手順
+```bash
+cd android-client
+./gradlew assembleRelease
+```
+ビルド完了後、`android-client/app/build/outputs/apk/release/app-release-unsigned.apk` が生成されます。
 
 ## 設定 (config.yaml)
 
