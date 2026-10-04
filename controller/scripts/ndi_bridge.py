@@ -60,7 +60,46 @@ def discover_sources(timeout_sec: float = 1.0) -> list[dict]:
     return result
 
 
-def stream_source(source_name: str, width: int, height: int, fps: int):
+def crop_and_resize(arr: np.ndarray, target_width: int, target_height: int, crop_mode: str = "center") -> np.ndarray:
+    """
+    Resizes or crops input frame to target canvas size.
+    Modes:
+      - 'center': Crops input frame around center to match target aspect ratio, then resizes.
+      - 'stretch': Stretches input frame to target size without maintaining aspect ratio.
+    """
+    src_h, src_w = arr.shape[:2]
+    if src_w == target_width and src_h == target_height:
+        return arr
+
+    if crop_mode != "center":
+        return cv2.resize(arr, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+
+    src_aspect = src_w / src_h
+    target_aspect = target_width / target_height
+
+    if abs(src_aspect - target_aspect) < 1e-4:
+        return cv2.resize(arr, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+
+    if src_aspect < target_aspect:
+        # Source is taller than target -> crop top and bottom
+        crop_w = src_w
+        crop_h = int(round(src_w / target_aspect))
+        crop_h = max(1, min(src_h, crop_h))
+        crop_x = 0
+        crop_y = (src_h - crop_h) // 2
+    else:
+        # Source is wider than target -> crop left and right
+        crop_h = src_h
+        crop_w = int(round(src_h * target_aspect))
+        crop_w = max(1, min(src_w, crop_w))
+        crop_x = (src_w - crop_w) // 2
+        crop_y = 0
+
+    cropped = arr[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w]
+    return cv2.resize(cropped, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+
+
+def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode: str = "center"):
     # Set stdout to binary non-buffered mode
     stdout = sys.stdout.buffer
 
@@ -121,8 +160,8 @@ def stream_source(source_name: str, width: int, height: int, fps: int):
                 arr = np.frombuffer(raw_data, dtype=np.uint8, count=w * h * 4).reshape((h, w, 4))
 
                 if w != width or h != height:
-                    resized = cv2.resize(arr, (width, height), interpolation=cv2.INTER_LINEAR)
-                    out_bytes = resized.tobytes()
+                    processed = crop_and_resize(arr, width, height, crop_mode=crop_mode)
+                    out_bytes = processed.tobytes()
                 else:
                     out_bytes = raw_data
 
@@ -145,6 +184,7 @@ def main():
     parser.add_argument("--width", type=int, default=5792, help="Output canvas width")
     parser.add_argument("--height", type=int, default=540, help="Output canvas height")
     parser.add_argument("--fps", type=int, default=30, help="Output frame rate")
+    parser.add_argument("--crop-mode", type=str, default="center", choices=["center", "stretch"], help="Crop mode: 'center' (default) or 'stretch'")
     args = parser.parse_args()
 
     if args.discover:
@@ -157,7 +197,7 @@ def main():
         sys.stderr.write("Error: --source is required for streaming.\n")
         os._exit(1)
 
-    stream_source(args.source, args.width, args.height, args.fps)
+    stream_source(args.source, args.width, args.height, args.fps, args.crop_mode)
     os._exit(0)
 
 
