@@ -77,7 +77,7 @@ const emit = defineEmits<{
           >
             <option value="testpattern">Color Bars (SMPTE & Boundary Guide)</option>
             <option value="rainbow">Rainbow Motion (Dynamic Multi-Color Pattern)</option>
-            <option value="logo">TechnoTUT Logo (Screen-Span Flyby)</option>
+            <option value="logo">TechnoTUT Logo (Continuous Tiled Crawl)</option>
             <option value="video">Local Video File (MP4 / H.264)</option>
             <option value="ndi">NDI Video Source (Network Stream)</option>
           </select>

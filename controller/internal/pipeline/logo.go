@@ -35,7 +35,7 @@ var rawLogoShapes = []logoShape{
 	}},
 	{color: 1, minX: 92.23, maxX: 114.23, minY: 27.70, maxY: 57.00, loops: [][]pt{
 		{{99.59, 49.70}, {114.23, 49.70}, {114.23, 57.00}, {92.23, 57.00}, {92.23, 27.70}, {114.23, 27.70}, {114.23, 45.58}, {99.59, 45.58}},
-		{{99.59, 30.91}, {99.59, 40.00}, {106.90, 40.00}, {106.90, 35.00}},
+		{{99.59, 35.00}, {99.59, 40.00}, {106.90, 40.00}, {106.90, 35.00}},
 	}},
 	{color: 1, minX: 116.31, maxX: 138.31, minY: 27.70, maxY: 57.00, loops: [][]pt{
 		{{131.00, 45.77}, {138.31, 45.77}, {138.31, 57.00}, {116.31, 57.00}, {116.31, 27.70}, {138.31, 27.70}, {138.31, 39.00}, {131.00, 39.00}, {131.00, 35.00}, {123.67, 35.00}, {123.67, 49.70}, {131.00, 49.70}},
@@ -124,7 +124,7 @@ func pointInPoly(px, py float64, poly []pt) bool {
 }
 
 func (g *LogoGenerator) loadLogo() {
-	scale := 4.0
+	scale := 7.0
 	g.logoW = int(300.41*scale) + 1
 	g.logoH = int(74.96*scale) + 1
 	total := g.logoW * g.logoH
@@ -224,39 +224,38 @@ func (g *LogoGenerator) NextFrame() []byte {
 		return frame
 	}
 
-	cycleFrames := int(float64(g.fps) * 4.0) // 4.0s loop
-	frameInCycle := g.frameIdx % cycleFrames
-	g.frameIdx++
-
 	centerY := g.height / 2
 	top := centerY - g.logoH/2
 	if top < 0 {
 		top = 0
 	}
 
-	travelDuration := 3.2 // 3.2 seconds travel across the entire canvas
-	travelFrames := int(travelDuration * float64(g.fps))
+	// Gap between logos and total period (pitch)
+	gap := 280
+	pitch := g.logoW + gap
 
-	if frameInCycle >= travelFrames {
-		// Rest interval between loops
-		return frame
+	// Smooth slow crawl from right to left
+	pixelsMoved := int(float64(g.frameIdx) * 8)
+	g.frameIdx++
+
+	// Base offset within pitch cycle
+	offset := -(pixelsMoved % pitch)
+	if offset > 0 {
+		offset -= pitch
 	}
 
-	progress := float64(frameInCycle) / float64(travelFrames)
-	// Smooth easing: slight speed-up across the center
-	progress = progress * progress * (3.0 - 2.0*progress)
+	// Draw repeating logos across the screen width (from left margin to right edge)
+	for startX := offset - pitch; startX < g.width+pitch; startX += pitch {
+		if startX+g.logoW < 0 || startX >= g.width {
+			continue
+		}
+		g.renderInstance(frame, startX, top)
+	}
 
-	startX := float64(g.width + 100)
-	endX := float64(-g.logoW - 100)
-	currentX := int(startX - progress*(startX-endX))
-
-	g.renderFlyby(frame, currentX, top)
 	return frame
 }
 
-func (g *LogoGenerator) renderFlyby(frame []byte, left, top int) {
-	trailLength := 90 // trailing light streak behind the logo (to the right)
-
+func (g *LogoGenerator) renderInstance(frame []byte, left, top int) {
 	for ly := 0; ly < g.logoH; ly++ {
 		fy := top + ly
 		if fy < 0 || fy >= g.height {
@@ -266,6 +265,10 @@ func (g *LogoGenerator) renderFlyby(frame []byte, left, top int) {
 
 		for lx := 0; lx < g.logoW; lx++ {
 			fx := left + lx
+			if fx < 0 || fx >= g.width {
+				continue
+			}
+
 			idx := ly*g.logoW + lx
 			p := g.logoPixels[idx]
 			if p.a == 0 {
@@ -273,45 +276,14 @@ func (g *LogoGenerator) renderFlyby(frame []byte, left, top int) {
 			}
 
 			isEdge := g.outlineMask[idx]
-
-			// Draw trailing light streaks behind logo edges (to the right: x > fx)
-			if isEdge {
-				for tr := 1; tr < trailLength; tr++ {
-					tfx := fx + tr
-					if tfx < 0 || tfx >= g.width {
-						continue
-					}
-					tidx := rowOffset + tfx*4
-					decay := math.Exp(-float64(tr) / 18.0) // Exponential falloff
-					tB := byte(float64(p.b) * 0.7 * decay)
-					tG := byte(float64(p.g) * 0.7 * decay)
-					tR := byte(float64(p.r) * 0.7 * decay)
-
-					if tB > frame[tidx+0] {
-						frame[tidx+0] = tB
-					}
-					if tG > frame[tidx+1] {
-						frame[tidx+1] = tG
-					}
-					if tR > frame[tidx+2] {
-						frame[tidx+2] = tR
-					}
-				}
-			}
-
-			// Draw actual logo pixel
-			if fx < 0 || fx >= g.width {
-				continue
-			}
-
 			fidx := rowOffset + fx*4
-			var valB, valG, valR float64
 
+			var valB, valG, valR float64
 			if isEdge {
-				// Enhanced glowing neon edge
-				valB = math.Min(255.0, float64(p.b)*1.3+40.0)
-				valG = math.Min(255.0, float64(p.g)*1.3+40.0)
-				valR = math.Min(255.0, float64(p.r)*1.3+40.0)
+				// Crisp glowing neon edge
+				valB = math.Min(255.0, float64(p.b)*1.25+35.0)
+				valG = math.Min(255.0, float64(p.g)*1.25+35.0)
+				valR = math.Min(255.0, float64(p.r)*1.25+35.0)
 			} else {
 				valB = float64(p.b)
 				valG = float64(p.g)

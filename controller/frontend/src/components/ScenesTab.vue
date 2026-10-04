@@ -351,7 +351,7 @@ const activeSourceLabel = computed(() => {
               </div>
               <div>
                 <h4 class="text-sm font-bold text-slate-900 dark:text-slate-100">TechnoTUT Logo</h4>
-                <p class="text-[11px] text-slate-500 dark:text-slate-400">Screen-Span Flyby (Right to Left)</p>
+                <p class="text-[11px] text-slate-500 dark:text-slate-400">Continuous Tiled Crawl (Right to Left)</p>
               </div>
             </div>
             <span
