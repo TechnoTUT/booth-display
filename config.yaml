@@ -1,0 +1,39 @@
+server:
+    http_port: 8080
+    default_stream_port: 8554
+    ws_ping_interval_sec: 5
+canvas:
+    width: 5760
+    height: 540
+    fps: 30
+displays:
+    - id: display-1
+      name: Display Left
+      ip: 127.0.0.1
+      port: 8554
+      width: 1920
+      height: 540
+      crop_x: 0
+      crop_y: 0
+      bezel_padding_right: 0
+    - id: display-2
+      name: Display Center
+      ip: 127.0.0.1
+      port: 8555
+      width: 1920
+      height: 540
+      crop_x: 1920
+      crop_y: 0
+      bezel_padding_right: 0
+    - id: display-3
+      name: Display Right
+      ip: 127.0.0.1
+      port: 8556
+      width: 1920
+      height: 540
+      crop_x: 3840
+      crop_y: 0
+      bezel_padding_right: 0
+media:
+    default_mode: testpattern
+    video_file: ""

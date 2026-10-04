@@ -1,0 +1,46 @@
+# Binaries and build outputs
+controller/bin/
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Node.js / Vite
+node_modules/
+controller/frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Vite build output (keep directory structure for go:embed)
+controller/web/dist/*
+!controller/web/dist/.gitkeep
+
+# Android (future client app)
+.gradle/
+build/
+app/build/
+android-client/**/build/
+android-client/.gradle/
+*.apk
+*.aab
+local.properties
+.cxx/
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# Temporary media files
+*.mp4
+*.mkv
+*.mov

@@ -1,0 +1,205 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
+	"booth-display/controller/internal/config"
+	"booth-display/controller/internal/pipeline"
+	"booth-display/controller/internal/streamer"
+)
+
+type APIHandler struct {
+	cfg       *config.Config
+	engine    *pipeline.PipelineEngine
+	streamers *streamer.StreamerPool
+}
+
+func NewAPIHandler(cfg *config.Config, engine *pipeline.PipelineEngine, streamers *streamer.StreamerPool) *APIHandler {
+	return &APIHandler{
+		cfg:       cfg,
+		engine:    engine,
+		streamers: streamers,
+	}
+}
+
+func (h *APIHandler) HandleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	snap := h.cfg.GetSnapshot()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(snap)
+}
+
+type UpdateConfigRequest struct {
+	Displays []config.DisplayConfig `json:"displays"`
+}
+
+func (h *APIHandler) HandlePostConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req UpdateConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Displays) > 0 {
+		if err := h.cfg.UpdateDisplays(req.Displays); err != nil {
+			http.Error(w, "Failed to save displays: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Rebuild streamer senders and pipeline
+		_ = h.engine.RebuildPipelines(req.Displays)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+type PlaybackRequest struct {
+	Action    string `json:"action"`     // "play", "stop"
+	Mode      string `json:"mode"`       // "testpattern", "video", "ndi"
+	VideoFile string `json:"video_file"`
+	NDISource string `json:"ndi_source"`
+}
+
+func (h *APIHandler) HandlePlayback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req PlaybackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	switch req.Action {
+	case "play":
+		target := req.VideoFile
+		if req.Mode == "ndi" {
+			target = req.NDISource
+		}
+		if err := h.engine.Start(req.Mode, target); err != nil {
+			http.Error(w, "Failed to start pipeline: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case "stop":
+		h.engine.Stop()
+	default:
+		http.Error(w, "Unknown action: "+req.Action, http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "ok",
+		"pipeline": h.engine.GetStatus(),
+	})
+}
+
+func (h *APIHandler) HandleNDISources(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sources, err := pipeline.DiscoverNDISources()
+	if err != nil {
+		// Log and return empty list instead of failing GUI
+		sources = []pipeline.NDISource{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"sources": sources,
+	})
+}
+
+func (h *APIHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	resp := map[string]interface{}{
+		"pipeline": h.engine.GetStatus(),
+		"metrics":  h.streamers.GetAllMetrics(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (h *APIHandler) HandlePreviewMJPEG(w http.ResponseWriter, r *http.Request) {
+	broadcaster := h.engine.GetPreviewBroadcaster()
+	sub := broadcaster.Subscribe()
+	defer broadcaster.Unsubscribe(sub)
+
+	rc := http.NewResponseController(w)
+	// Clear the 15-second write timeout for long-lived streaming
+	_ = rc.SetWriteDeadline(time.Time{})
+
+	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, hasFlusher := w.(http.Flusher)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case frame, ok := <-sub:
+			if !ok {
+				return
+			}
+			header := fmt.Sprintf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(frame))
+			if _, err := w.Write([]byte(header)); err != nil {
+				return
+			}
+			if _, err := w.Write(frame); err != nil {
+				return
+			}
+			if _, err := w.Write([]byte("\r\n")); err != nil {
+				return
+			}
+			if hasFlusher {
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+func (h *APIHandler) HandlePreviewSnapshot(w http.ResponseWriter, r *http.Request) {
+	broadcaster := h.engine.GetPreviewBroadcaster()
+	frame := broadcaster.GetLatest()
+
+	if len(frame) == 0 {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		svg := `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="120" viewBox="0 0 1280 120">
+			<rect width="100%" height="100%" fill="#0f172a"/>
+			<text x="50%" y="50%" fill="#64748b" font-family="sans-serif" font-size="20" font-weight="bold" text-anchor="middle" dominant-baseline="middle">
+				STREAM OFFLINE - PRESS START STREAM TO PREVIEW
+			</text>
+		</svg>`
+		_, _ = w.Write([]byte(svg))
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(frame)
+}

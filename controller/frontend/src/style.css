@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --brand: #C7000A;
+    --brand-hover: #b00009;
+  }
+}
