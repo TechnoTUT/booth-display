@@ -86,7 +86,7 @@ const activeSourceLabel = computed(() => {
   } else if (src === 'video') {
     return `Video: ${props.scene.active_target || props.videoFilePath || 'Local File'}`
   } else if (src === 'logo') {
-    return 'TECHNOTUT Logo (Edge-Trace & Glow Loop)'
+    return 'TechnoTUT Logo'
   } else if (src === 'rainbow') {
     return 'Rainbow Motion (FFmpeg testsrc)'
   } else if (src === 'testpattern') {
@@ -350,8 +350,8 @@ const activeSourceLabel = computed(() => {
                 <Tv class="w-5 h-5" />
               </div>
               <div>
-                <h4 class="text-sm font-bold text-slate-900 dark:text-slate-100">Logo Animation</h4>
-                <p class="text-[11px] text-slate-500 dark:text-slate-400">Edge-Trace & Glow Loop</p>
+                <h4 class="text-sm font-bold text-slate-900 dark:text-slate-100">TechnoTUT Logo</h4>
+                <p class="text-[11px] text-slate-500 dark:text-slate-400">Screen-Span Flyby (Right to Left)</p>
               </div>
             </div>
             <span
@@ -363,7 +363,7 @@ const activeSourceLabel = computed(() => {
           </div>
 
           <div class="flex items-center justify-between text-xs text-slate-500">
-            <span>TechnoTUT Brand</span>
+            <span>Speed Motion</span>
             <span class="font-semibold text-indigo-600 dark:text-indigo-400 group-hover:underline">TAKE &rarr;</span>
           </div>
         </div>

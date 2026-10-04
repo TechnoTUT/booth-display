@@ -1,17 +1,65 @@
 package pipeline
 
 import (
-	"bytes"
-	_ "embed"
-	"image/png"
 	"math"
 	"sync"
 
 	"booth-display/controller/internal/config"
 )
 
-//go:embed logo.png
-var defaultLogoPNG []byte
+type pt struct {
+	x, y float64
+}
+
+type logoShape struct {
+	color byte // 1: white, 2: red (#c7000a)
+	minX  float64
+	maxX  float64
+	minY  float64
+	maxY  float64
+	loops [][]pt
+}
+
+var rawLogoShapes = []logoShape{
+	{color: 2, minX: 28.46, maxX: 45.85, minY: 16.94, maxY: 58.03, loops: [][]pt{
+		{{45.84, 26.97}, {38.68, 22.83}, {38.67, 43.92}, {35.64, 45.68}, {35.64, 21.08}, {28.47, 16.94}, {28.46, 58.03}, {45.85, 47.99}, {45.84, 26.97}},
+	}},
+	{color: 1, minX: 45.21, maxX: 64.05, minY: 26.60, maxY: 48.36, loops: [][]pt{
+		{{45.21, 26.60}, {45.21, 48.36}, {52.35, 44.23}, {52.38, 38.99}, {56.92, 41.60}, {64.05, 37.48}, {45.21, 26.60}},
+	}},
+	{color: 1, minX: 7.11, maxX: 33.07, minY: 4.60, maxY: 70.36, loops: [][]pt{
+		{{17.34, 10.51}, {17.34, 10.51}, {7.11, 4.60}, {7.11, 70.36}, {14.28, 66.21}, {14.28, 17.00}, {17.34, 18.75}, {17.34, 64.44}, {24.52, 60.30}, {24.52, 22.93}, {29.48, 25.81}, {33.07, 19.59}, {17.34, 10.51}},
+	}},
+	{color: 1, minX: 64.60, maxX: 90.14, minY: 18.55, maxY: 57.00, loops: [][]pt{
+		{{73.74, 25.77}, {64.60, 25.77}, {64.60, 18.55}, {90.14, 18.55}, {90.14, 25.77}, {81.00, 25.77}, {81.00, 57.00}, {73.74, 57.00}},
+	}},
+	{color: 1, minX: 92.23, maxX: 114.23, minY: 27.70, maxY: 57.00, loops: [][]pt{
+		{{99.59, 49.70}, {114.23, 49.70}, {114.23, 57.00}, {92.23, 57.00}, {92.23, 27.70}, {114.23, 27.70}, {114.23, 45.58}, {99.59, 45.58}},
+		{{99.59, 30.91}, {99.59, 40.00}, {106.90, 40.00}, {106.90, 35.00}},
+	}},
+	{color: 1, minX: 116.31, maxX: 138.31, minY: 27.70, maxY: 57.00, loops: [][]pt{
+		{{131.00, 45.77}, {138.31, 45.77}, {138.31, 57.00}, {116.31, 57.00}, {116.31, 27.70}, {138.31, 27.70}, {138.31, 39.00}, {131.00, 39.00}, {131.00, 35.00}, {123.67, 35.00}, {123.67, 49.70}, {131.00, 49.70}},
+	}},
+	{color: 1, minX: 140.44, maxX: 162.42, minY: 18.55, maxY: 57.00, loops: [][]pt{
+		{{140.44, 18.55}, {147.75, 18.55}, {147.75, 27.70}, {162.42, 27.70}, {162.42, 57.00}, {155.11, 57.00}, {155.11, 35.00}, {147.78, 35.00}, {147.78, 57.00}, {140.45, 57.00}},
+	}},
+	{color: 1, minX: 164.53, maxX: 186.53, minY: 27.70, maxY: 57.00, loops: [][]pt{
+		{{171.86, 57.00}, {164.53, 57.00}, {164.53, 27.70}, {186.53, 27.70}, {186.53, 57.00}, {179.20, 57.00}, {179.20, 35.00}, {171.87, 35.00}},
+	}},
+	{color: 1, minX: 188.59, maxX: 210.59, minY: 27.70, maxY: 57.00, loops: [][]pt{
+		{{210.59, 27.70}, {210.59, 57.00}, {188.59, 57.00}, {188.59, 27.70}},
+		{{196.00, 35.00}, {196.00, 49.70}, {203.33, 49.70}, {203.33, 35.00}},
+	}},
+	{color: 1, minX: 212.71, maxX: 238.25, minY: 18.55, maxY: 57.00, loops: [][]pt{
+		{{221.86, 25.77}, {212.71, 25.77}, {212.71, 18.55}, {238.25, 18.55}, {238.25, 25.77}, {229.10, 25.77}, {229.10, 57.00}, {221.85, 57.00}},
+	}},
+	{color: 1, minX: 240.37, maxX: 265.91, minY: 18.55, maxY: 57.00, loops: [][]pt{
+		{{258.69, 18.55}, {265.91, 18.55}, {265.91, 57.00}, {240.37, 57.00}, {240.37, 18.55}, {247.62, 18.55}, {247.62, 49.78}, {258.69, 49.78}},
+	}},
+	{color: 1, minX: 268.00, maxX: 293.54, minY: 18.55, maxY: 57.00, loops: [][]pt{
+		{{277.18, 25.77}, {268.00, 25.77}, {268.00, 18.55}, {293.54, 18.55}, {293.54, 25.77}, {284.39, 25.77}, {284.39, 57.00}, {277.14, 57.00}},
+	}},
+}
 
 type LogoGenerator struct {
 	canvas   config.CanvasConfig
@@ -60,41 +108,80 @@ func NewLogoGenerator(canvas config.CanvasConfig, displays []config.DisplayConfi
 	return g
 }
 
-func (g *LogoGenerator) loadLogo() {
-	img, err := png.Decode(bytes.NewReader(defaultLogoPNG))
-	if err != nil {
-		return
+func pointInPoly(px, py float64, poly []pt) bool {
+	inside := false
+	n := len(poly)
+	for i := 0; i < n; i++ {
+		p1 := poly[i]
+		p2 := poly[(i+1)%n]
+		if (p1.y > py) != (p2.y > py) {
+			if px < (p2.x-p1.x)*(py-p1.y)/(p2.y-p1.y)+p1.x {
+				inside = !inside
+			}
+		}
 	}
+	return inside
+}
 
-	bounds := img.Bounds()
-	g.logoW = bounds.Dx()
-	g.logoH = bounds.Dy()
+func (g *LogoGenerator) loadLogo() {
+	scale := 4.0
+	g.logoW = int(300.41*scale) + 1
+	g.logoH = int(74.96*scale) + 1
 	total := g.logoW * g.logoH
 
 	g.logoPixels = make([]logoPixel, total)
 	g.outlineMask = make([]bool, total)
 
-	for y := 0; y < g.logoH; y++ {
-		for x := 0; x < g.logoW; x++ {
-			c := img.At(bounds.Min.X+x, bounds.Min.Y+y)
-			r, gr, b, a := c.RGBA()
-			idx := y*g.logoW + x
-			if a > 0 {
-				// Convert from premultiplied alpha
-				alphaVal := byte(a >> 8)
-				rVal := byte((r * 255) / a)
-				gVal := byte((gr * 255) / a)
-				bVal := byte((b * 255) / a)
-				g.logoPixels[idx] = logoPixel{b: bVal, g: gVal, r: rVal, a: alphaVal}
+	for _, s := range rawLogoShapes {
+		ix0 := int(s.minX * scale)
+		if ix0 < 0 {
+			ix0 = 0
+		}
+		ix1 := int(s.maxX*scale) + 1
+		if ix1 > g.logoW {
+			ix1 = g.logoW
+		}
+		iy0 := int(s.minY * scale)
+		if iy0 < 0 {
+			iy0 = 0
+		}
+		iy1 := int(s.maxY*scale) + 1
+		if iy1 > g.logoH {
+			iy1 = g.logoH
+		}
+
+		var p logoPixel
+		if s.color == 2 {
+			// Red #c7000a -> BGR: [10, 0, 199]
+			p = logoPixel{b: 10, g: 0, r: 199, a: 255}
+		} else {
+			// White -> BGR: [255, 255, 255]
+			p = logoPixel{b: 255, g: 255, r: 255, a: 255}
+		}
+
+		for y := iy0; y < iy1; y++ {
+			sy := float64(y) / scale
+			rowIdx := y * g.logoW
+			for x := ix0; x < ix1; x++ {
+				sx := float64(x) / scale
+				hits := 0
+				for _, loop := range s.loops {
+					if pointInPoly(sx, sy, loop) {
+						hits++
+					}
+				}
+				if hits%2 == 1 {
+					g.logoPixels[rowIdx+x] = p
+				}
 			}
 		}
 	}
 
-	// Compute sharp 1-pixel to 2-pixel edge outline
+	// Compute sharp 1-pixel edge outline
 	for y := 0; y < g.logoH; y++ {
 		for x := 0; x < g.logoW; x++ {
 			idx := y*g.logoW + x
-			if g.logoPixels[idx].a > 40 {
+			if g.logoPixels[idx].a > 0 {
 				isEdge := false
 				for dy := -1; dy <= 1; dy++ {
 					for dx := -1; dx <= 1; dx++ {
@@ -104,7 +191,7 @@ func (g *LogoGenerator) loadLogo() {
 							break
 						}
 						nidx := ny*g.logoW + nx
-						if g.logoPixels[nidx].a <= 40 {
+						if g.logoPixels[nidx].a == 0 {
 							isEdge = true
 							break
 						}
@@ -137,18 +224,9 @@ func (g *LogoGenerator) NextFrame() []byte {
 		return frame
 	}
 
-	cycleFrames := int(float64(g.fps) * 4.5) // 4.5s loop
+	cycleFrames := int(float64(g.fps) * 4.0) // 4.0s loop
 	frameInCycle := g.frameIdx % cycleFrames
 	g.frameIdx++
-
-	// 3 Display centers (Display 1: 960, Display 2: 2880, Display 3: 4800)
-	displayCentersX := []int{960, 2880, 4800}
-	if len(g.displays) > 0 {
-		displayCentersX = make([]int, 0, len(g.displays))
-		for _, d := range g.displays {
-			displayCentersX = append(displayCentersX, d.CropX+d.Width/2)
-		}
-	}
 
 	centerY := g.height / 2
 	top := centerY - g.logoH/2
@@ -156,79 +234,38 @@ func (g *LogoGenerator) NextFrame() []byte {
 		top = 0
 	}
 
-	// Render animated logo patch
-	phaseTime := float64(frameInCycle) / float64(g.fps)
+	travelDuration := 3.2 // 3.2 seconds travel across the entire canvas
+	travelFrames := int(travelDuration * float64(g.fps))
 
-	for _, cx := range displayCentersX {
-		left := cx - g.logoW/2
-		if left < 0 || left+g.logoW > g.width {
-			continue
-		}
-
-		g.renderLogoPatch(frame, left, top, phaseTime)
+	if frameInCycle >= travelFrames {
+		// Rest interval between loops
+		return frame
 	}
 
+	progress := float64(frameInCycle) / float64(travelFrames)
+	// Smooth easing: slight speed-up across the center
+	progress = progress * progress * (3.0 - 2.0*progress)
+
+	startX := float64(g.width + 100)
+	endX := float64(-g.logoW - 100)
+	currentX := int(startX - progress*(startX-endX))
+
+	g.renderFlyby(frame, currentX, top)
 	return frame
 }
 
-func (g *LogoGenerator) renderLogoPatch(frame []byte, left, top int, t float64) {
-	// Animation Phases:
-	// Phase 1: 0.0s - 1.2s : Laser scanning edge-trace reveal
-	// Phase 2: 1.2s - 2.0s : Solid body fill-in
-	// Phase 3: 2.0s - 3.0s : Subtle breathing glow hold
-	// Phase 4: 3.0s - 3.8s : Solid fadeout to outline and dissolve
-	// Phase 5: 3.8s - 4.5s : Dark rest
-
-	var scanX int = -999
-	var edgeAlpha, solidAlpha float64
-	var edgeBoost float64 = 1.0
-
-	if t < 1.2 {
-		p := t / 1.2
-		scanX = int(p * float64(g.logoW+80)) - 40
-		edgeAlpha = 1.0
-		solidAlpha = 0.0
-		edgeBoost = 1.4
-	} else if t < 2.0 {
-		fillP := (t - 1.2) / 0.8
-		edgeAlpha = 1.0
-		solidAlpha = fillP
-		edgeBoost = 1.4 - fillP*0.4
-	} else if t < 3.0 {
-		holdP := (t - 2.0) / 1.0
-		pulse := 1.0 + 0.08*math.Sin(holdP*math.Pi)
-		edgeAlpha = 1.0
-		solidAlpha = pulse
-		if solidAlpha > 1.0 {
-			solidAlpha = 1.0
-		}
-	} else if t < 3.8 {
-		dissolveP := (t - 3.0) / 0.8
-		if dissolveP < 0.4 {
-			solidAlpha = 1.0 - dissolveP/0.4
-			edgeAlpha = 1.0
-		} else {
-			solidAlpha = 0.0
-			edgeAlpha = 1.0 - (dissolveP-0.4)/0.6
-		}
-	} else {
-		// Dark rest
-		return
-	}
+func (g *LogoGenerator) renderFlyby(frame []byte, left, top int) {
+	trailLength := 90 // trailing light streak behind the logo (to the right)
 
 	for ly := 0; ly < g.logoH; ly++ {
 		fy := top + ly
-		if fy >= g.height {
-			break
+		if fy < 0 || fy >= g.height {
+			continue
 		}
 		rowOffset := fy * g.width * 4
 
 		for lx := 0; lx < g.logoW; lx++ {
 			fx := left + lx
-			if fx >= g.width {
-				break
-			}
-
 			idx := ly*g.logoW + lx
 			p := g.logoPixels[idx]
 			if p.a == 0 {
@@ -237,48 +274,48 @@ func (g *LogoGenerator) renderLogoPatch(frame []byte, left, top int, t float64) 
 
 			isEdge := g.outlineMask[idx]
 
-			// Scanline masking in Phase 1
-			if scanX != -999 {
-				if lx > scanX {
-					continue
+			// Draw trailing light streaks behind logo edges (to the right: x > fx)
+			if isEdge {
+				for tr := 1; tr < trailLength; tr++ {
+					tfx := fx + tr
+					if tfx < 0 || tfx >= g.width {
+						continue
+					}
+					tidx := rowOffset + tfx*4
+					decay := math.Exp(-float64(tr) / 18.0) // Exponential falloff
+					tB := byte(float64(p.b) * 0.7 * decay)
+					tG := byte(float64(p.g) * 0.7 * decay)
+					tR := byte(float64(p.r) * 0.7 * decay)
+
+					if tB > frame[tidx+0] {
+						frame[tidx+0] = tB
+					}
+					if tG > frame[tidx+1] {
+						frame[tidx+1] = tG
+					}
+					if tR > frame[tidx+2] {
+						frame[tidx+2] = tR
+					}
 				}
 			}
 
-			var valB, valG, valR float64
-			baseB := float64(p.b)
-			baseG := float64(p.g)
-			baseR := float64(p.r)
-
-			if isEdge {
-				// Spark highlight near scan front
-				spark := 0.0
-				if scanX != -999 {
-					dist := math.Abs(float64(lx - scanX))
-					if dist < 20 {
-						spark = (1.0 - dist/20.0) * 120.0
-					}
-				}
-				valB = (baseB*edgeBoost + 30.0 + spark) * edgeAlpha
-				valG = (baseG*edgeBoost + 30.0 + spark) * edgeAlpha
-				valR = (baseR*edgeBoost + 30.0 + spark) * edgeAlpha
-			} else if solidAlpha > 0 {
-				valB = baseB * solidAlpha
-				valG = baseG * solidAlpha
-				valR = baseR * solidAlpha
-			} else {
+			// Draw actual logo pixel
+			if fx < 0 || fx >= g.width {
 				continue
 			}
 
 			fidx := rowOffset + fx*4
-			// Alpha composite over background
-			if valB > 255 {
-				valB = 255
-			}
-			if valG > 255 {
-				valG = 255
-			}
-			if valR > 255 {
-				valR = 255
+			var valB, valG, valR float64
+
+			if isEdge {
+				// Enhanced glowing neon edge
+				valB = math.Min(255.0, float64(p.b)*1.3+40.0)
+				valG = math.Min(255.0, float64(p.g)*1.3+40.0)
+				valR = math.Min(255.0, float64(p.r)*1.3+40.0)
+			} else {
+				valB = float64(p.b)
+				valG = float64(p.g)
+				valR = float64(p.r)
 			}
 
 			if byte(valB) > frame[fidx+0] {
