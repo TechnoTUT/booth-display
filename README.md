@@ -6,13 +6,13 @@ Web-GUIを内包したスタンドアロン単一バイナリとして動作し�
 
 詳細なアーキテクチャやプロトコル仕様は [docs/](docs/) を参照してください。
 - システムアーキテクチャ: [docs/architecture.md](docs/architecture.md)
-- 映像伝送・同期プロトコル仕様: [docs/streaming-protocol.md](docs/streaming-protocol.md)
+- 映像伝送プロトコル仕様: [docs/streaming-protocol.md](docs/streaming-protocol.md)
 - 開発時の注意事項・環境設定: [docs/development.md](docs/development.md)
 
 ## 必要要件
 
 - OS: Linux (Debian 12+, Ubuntu 22.04+, Fedora 39+ など)
-- Go: 1.22 以上
+- Go: 1.26 以上
 - Node.js: 20 以上
 - FFmpeg: 6.0 以上 (libx264 有効)
 - uv: Python パッケージマネージャ (NDI 入力利用時、およびクライアントシミュレータ利用時)
