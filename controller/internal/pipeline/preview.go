@@ -96,7 +96,7 @@ func (p *PreviewPipeline) Start(mode string, mediaTarget string, canvas config.C
 
 	fps := 15 // 15 fps preview is smooth and very low CPU
 
-	if mode == "ndi" && inputReader != nil {
+	if inputReader != nil {
 		args = []string{
 			"-f", "rawvideo",
 			"-pix_fmt", "bgr0",
@@ -139,7 +139,7 @@ func (p *PreviewPipeline) Start(mode string, mediaTarget string, canvas config.C
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	if inputReader != nil && mode == "ndi" {
+	if inputReader != nil {
 		cmd.Stdin = inputReader
 	}
 

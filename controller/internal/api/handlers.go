@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"booth-display/controller/internal/config"
@@ -135,10 +138,98 @@ func (h *APIHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"pipeline": h.engine.GetStatus(),
 		"metrics":  h.streamers.GetAllMetrics(),
+		"scene":    h.engine.GetSceneStatus(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (h *APIHandler) HandleSceneStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(h.engine.GetSceneStatus())
+}
+
+type SceneSwitchRequest struct {
+	SourceType string `json:"source_type"` // "testpattern", "ndi", "video"
+	Target     string `json:"target"`      // NDI source name or video file path
+	Transition string `json:"transition"`  // "cut", "fade", "black"
+	DurationMs int    `json:"duration_ms"` // duration in milliseconds
+}
+
+func (h *APIHandler) HandleSceneSwitch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req SceneSwitchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	trans := pipeline.TransitionType(req.Transition)
+	if trans == "" {
+		trans = pipeline.TransitionCut
+	}
+
+	if err := h.engine.SwitchScene(req.SourceType, req.Target, trans, req.DurationMs); err != nil {
+		http.Error(w, "Failed to switch scene: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "ok",
+		"scene":  h.engine.GetSceneStatus(),
+	})
+}
+
+type AssetFile struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
+
+func (h *APIHandler) HandleListAssets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	assets := make([]AssetFile, 0)
+	entries, err := os.ReadDir("assets")
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || entry.Name() == ".gitkeep" {
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(entry.Name()))
+			if ext == ".mp4" || ext == ".mov" || ext == ".mkv" || ext == ".webm" || ext == ".avi" {
+				info, _ := entry.Info()
+				var size int64
+				if info != nil {
+					size = info.Size()
+				}
+				assets = append(assets, AssetFile{
+					Name: entry.Name(),
+					Path: filepath.Join("assets", entry.Name()),
+					Size: size,
+				})
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"assets": assets,
+	})
 }
 
 func (h *APIHandler) HandlePreviewMJPEG(w http.ResponseWriter, r *http.Request) {

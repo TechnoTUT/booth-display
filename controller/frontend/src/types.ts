@@ -53,3 +53,21 @@ export interface NDISourceItem {
   stream_name: string | null
   host_name: string | null
 }
+
+export interface SceneStatus {
+  active_source: string
+  active_target: string
+  next_source?: string
+  next_target?: string
+  transition: 'cut' | 'fade' | 'black'
+  duration_ms: number
+  in_transition: boolean
+  progress: number
+}
+
+export interface AssetFile {
+  name: string
+  path: string
+  size: number
+}
+

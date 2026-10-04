@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   Activity,
+  Sliders,
   Layers,
   Settings,
   Sun,
@@ -9,7 +10,7 @@ import {
 import type { PipelineStatus } from '../types'
 
 defineProps<{
-  activeTab: 'monitor' | 'canvas' | 'settings'
+  activeTab: 'monitor' | 'scenes' | 'canvas' | 'settings'
   pipeline: PipelineStatus
   isConnected: boolean
   totalBitrateMbps: string
@@ -18,7 +19,7 @@ defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'update:activeTab', tab: 'monitor' | 'canvas' | 'settings'): void
+  (e: 'update:activeTab', tab: 'monitor' | 'scenes' | 'canvas' | 'settings'): void
   (e: 'toggleTheme'): void
 }>()
 </script>
@@ -112,6 +113,19 @@ const emit = defineEmits<{
         >
           <Activity class="w-4 h-4" />
           <span>Control</span>
+        </button>
+
+        <button
+          @click="emit('update:activeTab', 'scenes')"
+          :class="[
+            'flex-1 md:flex-initial px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition flex items-center justify-center gap-2',
+            activeTab === 'scenes'
+              ? 'bg-[#C7000A] text-white shadow-md shadow-[#C7000A]/20'
+              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+          ]"
+        >
+          <Sliders class="w-4 h-4" />
+          <span>Scenes</span>
         </button>
 
         <button

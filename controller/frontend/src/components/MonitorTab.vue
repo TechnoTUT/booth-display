@@ -11,7 +11,7 @@ import type { PipelineStatus, NDISourceItem, DisplayMetrics } from '../types'
 defineProps<{
   pipeline: PipelineStatus
   isActionLoading: boolean
-  selectedMode: 'testpattern' | 'video' | 'ndi'
+  selectedMode: 'testpattern' | 'rainbow' | 'logo' | 'video' | 'ndi'
   videoFilePath: string
   selectedNdiSource: string
   ndiSources: NDISourceItem[]
@@ -23,7 +23,7 @@ const emit = defineEmits<{
   (e: 'play'): void
   (e: 'stop'): void
   (e: 'fetchNdiSources'): void
-  (e: 'update:selectedMode', val: 'testpattern' | 'video' | 'ndi'): void
+  (e: 'update:selectedMode', val: 'testpattern' | 'rainbow' | 'logo' | 'video' | 'ndi'): void
   (e: 'update:videoFilePath', val: string): void
   (e: 'update:selectedNdiSource', val: string): void
 }>()
@@ -75,7 +75,9 @@ const emit = defineEmits<{
             :disabled="pipeline.is_running"
             class="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2 text-sm font-medium text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-[#C7000A]"
           >
-            <option value="testpattern">Internal Test Pattern (Multi-Screen Sync)</option>
+            <option value="testpattern">Color Bars (SMPTE & Boundary Guide)</option>
+            <option value="rainbow">Rainbow Motion (Dynamic Multi-Color Pattern)</option>
+            <option value="logo">TECHNOTUT Logo (Edge-Trace & Glow Loop)</option>
             <option value="video">Local Video File (MP4 / H.264)</option>
             <option value="ndi">NDI Video Source (Network Stream)</option>
           </select>

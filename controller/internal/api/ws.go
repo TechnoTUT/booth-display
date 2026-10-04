@@ -72,6 +72,7 @@ func (m *WSManager) broadcastLoop() {
 			payload := map[string]interface{}{
 				"pipeline":  m.handler.engine.GetStatus(),
 				"metrics":   m.handler.streamers.GetAllMetrics(),
+				"scene":     m.handler.engine.GetSceneStatus(),
 				"timestamp": time.Now().UnixMilli(),
 			}
 

@@ -53,8 +53,8 @@ func (p *DisplayPipeline) Start(mode string, mediaTarget string, canvas config.C
 		fps = 30
 	}
 
-	if mode == "ndi" && inputReader != nil {
-		// NDI raw BGRX pipe input mode
+	if inputReader != nil {
+		// Raw BGRX pipe input mode (fed by CanvasMixer or NDI)
 		args = []string{
 			"-f", "rawvideo",
 			"-pix_fmt", "bgr0",
@@ -120,7 +120,7 @@ func (p *DisplayPipeline) Start(mode string, mediaTarget string, canvas config.C
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	if inputReader != nil && mode == "ndi" {
+	if inputReader != nil {
 		cmd.Stdin = inputReader
 	}
 

@@ -39,6 +39,9 @@ func NewServer(cfg *config.Config, engine *pipeline.PipelineEngine, streamers *s
 
 	mux.HandleFunc("/api/status", handler.HandleStatus)
 	mux.HandleFunc("/api/playback", handler.HandlePlayback)
+	mux.HandleFunc("/api/scene/status", handler.HandleSceneStatus)
+	mux.HandleFunc("/api/scene/switch", handler.HandleSceneSwitch)
+	mux.HandleFunc("/api/assets", handler.HandleListAssets)
 	mux.HandleFunc("/api/ndi/sources", handler.HandleNDISources)
 	mux.HandleFunc("/api/preview/mjpeg", handler.HandlePreviewMJPEG)
 	mux.HandleFunc("/api/preview/snapshot.jpg", handler.HandlePreviewSnapshot)

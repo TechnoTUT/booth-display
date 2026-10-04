@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import MonitorTab from './components/MonitorTab.vue'
+import ScenesTab from './components/ScenesTab.vue'
 import CanvasTab from './components/CanvasTab.vue'
 import SettingsTab from './components/SettingsTab.vue'
 import type {
@@ -9,7 +10,9 @@ import type {
   DisplayConfig,
   AppConfig,
   PipelineStatus,
-  NDISourceItem
+  NDISourceItem,
+  SceneStatus,
+  AssetFile
 } from './types'
 
 // Theme Control
@@ -26,7 +29,7 @@ function toggleColorMode() {
 }
 
 // Active Tab
-const activeTab = ref<'monitor' | 'canvas' | 'settings'>('monitor')
+const activeTab = ref<'monitor' | 'scenes' | 'canvas' | 'settings'>('scenes')
 
 // State
 const isConnected = ref(false)
@@ -35,15 +38,24 @@ const pipeline = ref<PipelineStatus>({
   active_mode: 'testpattern',
   video_file: ''
 })
+const scene = ref<SceneStatus>({
+  active_source: 'testpattern',
+  active_target: '',
+  transition: 'cut',
+  duration_ms: 500,
+  in_transition: false,
+  progress: 0
+})
 const metrics = ref<DisplayMetrics[]>([])
 const config = ref<AppConfig | null>(null)
 const editableDisplays = ref<DisplayConfig[]>([])
 
-const selectedMode = ref<'testpattern' | 'video' | 'ndi'>('testpattern')
+const selectedMode = ref<'testpattern' | 'rainbow' | 'logo' | 'video' | 'ndi'>('testpattern')
 const videoFilePath = ref('')
 const selectedNdiSource = ref('')
 const ndiSources = ref<NDISourceItem[]>([])
 const isNdiScanning = ref(false)
+const assetFiles = ref<AssetFile[]>([])
 
 const isActionLoading = ref(false)
 const saveStatusMessage = ref('')
@@ -148,6 +160,18 @@ async function fetchNdiSources() {
   }
 }
 
+async function fetchAssets() {
+  try {
+    const res = await fetch('/api/assets')
+    if (res.ok) {
+      const data = await res.json()
+      assetFiles.value = data.assets || []
+    }
+  } catch (err) {
+    console.error('Failed to fetch assets:', err)
+  }
+}
+
 async function handlePlay() {
   isActionLoading.value = true
   try {
@@ -216,6 +240,35 @@ async function handleSaveConfig() {
   }
 }
 
+async function handleSwitchScene(payload: {
+  sourceType: string
+  target: string
+  transition: string
+  durationMs: number
+}) {
+  try {
+    const res = await fetch('/api/scene/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_type: payload.sourceType,
+        target: payload.target,
+        transition: payload.transition,
+        duration_ms: payload.durationMs
+      })
+    })
+    if (res.ok) {
+      const data = await res.json()
+      if (data.scene) {
+        scene.value = data.scene
+      }
+      pipeline.value.is_running = true
+    }
+  } catch (err) {
+    console.error('Scene switch error:', err)
+  }
+}
+
 function connectWebSocket() {
   if (ws) ws.close()
 
@@ -237,6 +290,9 @@ function connectWebSocket() {
         if (wasRunning !== data.pipeline.is_running) {
           previewKey.value = Date.now()
         }
+      }
+      if (data.scene) {
+        scene.value = data.scene
       }
       if (data.metrics && Array.isArray(data.metrics)) {
         metrics.value = data.metrics
@@ -268,6 +324,7 @@ onMounted(() => {
 
   fetchConfig()
   fetchNdiSources()
+  fetchAssets()
   connectWebSocket()
 })
 
@@ -308,7 +365,22 @@ onUnmounted(() => {
         @fetch-ndi-sources="fetchNdiSources"
       />
 
-      <!-- TAB 2: CANVAS & LAYOUT -->
+      <!-- TAB 2: SCENES & QUICK SWITCHER -->
+      <ScenesTab
+        v-if="activeTab === 'scenes'"
+        :scene="scene"
+        :pipeline="pipeline"
+        :ndi-sources="ndiSources"
+        :is-ndi-scanning="isNdiScanning"
+        :video-file-path="videoFilePath"
+        :asset-files="assetFiles"
+        :preview-key="previewKey"
+        @refresh-ndi="fetchNdiSources"
+        @switch-scene="handleSwitchScene"
+        @reload-preview="reloadPreview"
+      />
+
+      <!-- TAB 3: CANVAS & LAYOUT -->
       <CanvasTab
         v-if="activeTab === 'canvas'"
         :pipeline="pipeline"
