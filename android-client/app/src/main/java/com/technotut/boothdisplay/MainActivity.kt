@@ -25,6 +25,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var frameCount = 0
     private var lastFpsCalculationTime = System.currentTimeMillis()
+    private var isStreamingActive = false
+
+    // 5-second stream timeout runnable to restore OSD standby view
+    private val streamTimeoutRunnable = Runnable {
+        isStreamingActive = false
+        textStatus.text = "UDP :$listenPort"
+        textMetrics.text = "Waiting for stream..."
+        textMetrics.setTextColor(android.graphics.Color.parseColor("#94A3B8"))
+        osdOverlay.visibility = View.VISIBLE
+    }
 
     // Configurable listen port (default: 8554)
     private var listenPort = 8554
@@ -46,17 +56,23 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         // Hide navigation/status bar
         applyImmersiveMode()
 
-        // Toggle OSD visibility on tap
+        // Toggle OSD visibility on user screen tap (shows for 5s then hides if streaming)
         surfaceView.setOnClickListener {
             val isVisible = osdOverlay.visibility == View.VISIBLE
-            osdOverlay.visibility = if (isVisible) View.GONE else View.VISIBLE
+            if (isVisible) {
+                osdOverlay.visibility = View.GONE
+            } else {
+                osdOverlay.visibility = View.VISIBLE
+                if (isStreamingActive) {
+                    mainHandler.postDelayed({
+                        if (isStreamingActive) {
+                            osdOverlay.visibility = View.GONE
+                        }
+                    }, 5000)
+                }
+            }
             applyImmersiveMode()
         }
-
-        // Auto-hide OSD after 8 seconds
-        mainHandler.postDelayed({
-            osdOverlay.visibility = View.GONE
-        }, 8000)
     }
 
     override fun onResume() {
@@ -107,14 +123,26 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
             frameCount++
             val now = System.currentTimeMillis()
-            if (now - lastFpsCalculationTime >= 1000) {
-                val fps = frameCount.toDouble() * 1000.0 / (now - lastFpsCalculationTime)
-                frameCount = 0
-                lastFpsCalculationTime = now
 
-                mainHandler.post {
+            mainHandler.post {
+                // Cancel existing timeout timer & reschedule for 5.0 seconds
+                mainHandler.removeCallbacks(streamTimeoutRunnable)
+                mainHandler.postDelayed(streamTimeoutRunnable, 5000)
+
+                // First frame arrived: hide OSD automatically
+                if (!isStreamingActive) {
+                    isStreamingActive = true
+                    osdOverlay.visibility = View.GONE
+                }
+
+                if (now - lastFpsCalculationTime >= 1000) {
+                    val fps = frameCount.toDouble() * 1000.0 / (now - lastFpsCalculationTime)
+                    frameCount = 0
+                    lastFpsCalculationTime = now
+
                     textStatus.text = "UDP :$listenPort"
                     textMetrics.text = String.format("%.1f FPS", fps)
+                    textMetrics.setTextColor(android.graphics.Color.parseColor("#10B981"))
                 }
             }
         }.apply {
@@ -123,6 +151,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun stopReceiver() {
+        mainHandler.removeCallbacks(streamTimeoutRunnable)
         receiver?.stop()
         receiver = null
     }
