@@ -29,9 +29,11 @@ dev-frontend:
 	npm --prefix controller/frontend run dev
 
 # 開発・検証用: Androidクライアント画面シミュレータの起動 (Web: http://localhost:9001)
+# av / opencv-python / numpy を含む uv プロジェクトのディレクトリを SIM_ENV_DIR で指定可能
+SIM_ENV_DIR ?= $(HOME)/utone-ndi-utils
 run-simulator:
 	@echo "===> Starting Display 1 Simulator (UDP :8554, Web :9001)..."
-	uv run --directory ../utone-ndi-utils python ./tools/simulator/client_simulator.py --id "display-1" --port 8554 --web-port 9001
+	uv run --directory $(SIM_ENV_DIR) python $(CURDIR)/tools/simulator/client_simulator.py --id "display-1" --port 8554 --web-port 9001
 
 # ビルド成果物のクリーンアップ
 clean:

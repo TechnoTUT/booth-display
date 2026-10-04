@@ -15,7 +15,11 @@ Web-GUIを内包したスタンドアロン単一バイナリとして動作し�
 - Go: 1.22 以上
 - Node.js: 20 以上
 - FFmpeg: 6.0 以上 (libx264 有効)
-- uv: Python パッケージマネージャ (NDI 入力利用時)
+- uv: Python パッケージマネージャ (NDI 入力利用時、およびクライアントシミュレータ利用時)
+- (Android クライアントをビルドする場合)
+  - JDK 17 以上
+  - Android SDK (`platforms;android-34`, `build-tools;34.0.0`)
+  - SDK の場所を `android-client/local.properties` の `sdk.dir=...` または環境変数 `ANDROID_HOME` で指定
 
 ---
 
@@ -65,19 +69,44 @@ LG Display LD290EJS-FPN1 (Android 7.1 / 1920x540) 上で動作する映像受信
 
 ### 特徴
 - MediaCodec によるハードウェア H.264 デコード (SurfaceView 直接描画)
-- 1GB RAM 向け超省メモリ設計 (中間 Bitmap 不使用による OOM 完全防止)
+- 1GB RAM 向け省メモリ設計 (中間 Bitmap 不使用により OOM を抑制)
 - イマーシブ全画面表示および端末起動時自動起動 (BOOT_COMPLETED)
 
 ### ビルド手順
+事前に「必要要件」の Android SDK を用意してください。
+
 ```bash
 cd android-client
-./gradlew assembleRelease
+
+# デバッグ版 (署名済み。端末へそのままインストール可能)
+./gradlew assembleDebug
 ```
-ビルド完了後、`android-client/app/build/outputs/apk/release/app-release-unsigned.apk` が生成されます。
+生成物: `android-client/app/build/outputs/apk/debug/app-debug.apk`
+
+```bash
+# 端末へのインストール
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+> リリース版 (`./gradlew assembleRelease`) は署名設定がないため、`app-release-unsigned.apk` が生成され、署名しないと端末にインストールできません。
+
+## クライアントシミュレータ (tools/simulator/)
+
+実機がなくても、UDP で受信した H.264 ストリームをデコードして Web ブラウザ上で確認できます。Python の `av`、`opencv-python`、`numpy` が入った uv 環境が必要です (既定は `~/utone-ndi-utils`)。
+
+```bash
+# display-1 (UDP :8554) のシミュレータを起動。ブラウザで http://localhost:9001 を開く
+make run-simulator
+
+# uv 環境の場所を変更する場合
+make run-simulator SIM_ENV_DIR=/path/to/uv-project
+```
 
 ## 設定 (config.yaml)
 
 サーバポート、全体仮想キャンバス解像度、各ディスプレイの宛先IP/ポートおよびクロップ座標を設定します。
+
+> 以下の例の `ip: "127.0.0.1"` はローカル検証 (シミュレータ) 用です。実機で運用する場合は、各ディスプレイ (Android クライアント) の実際の IP アドレスに変更してください。
 
 ```yaml
 server:

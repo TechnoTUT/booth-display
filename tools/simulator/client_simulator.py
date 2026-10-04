@@ -10,7 +10,7 @@ Functions:
   4. Encodes screen as 1920x540 MJPEG and serves a standalone Web UI at http://<ip>:<web_port>/.
 
 Run via uv:
-  uv run --directory ../utone-ndi-utils python tools/simulator/client_simulator.py --port 8554 --web-port 9001 --id "display-1"
+  uv run --directory <uv-project-dir> python tools/simulator/client_simulator.py --port 8554 --web-port 9001 --id "display-1"
 """
 from __future__ import annotations
 
