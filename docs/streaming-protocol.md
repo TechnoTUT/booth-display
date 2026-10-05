@@ -55,7 +55,7 @@
 - Magic: 0xBD (booth-display)
 - Version: 0x01
 - PayloadType:
-  - 0x01 = H.264 NAL Unit (Annex-B)
+  - 0x01 = H.264 Access Unit (Annex-B)。1フレーム分の全NAL (AUD, 必要に応じて SPS/PPS/SEI, スライス) を1つにまとめたもの。エンコーダは `aud=1:slices=1:repeat-headers=1` のBaselineで出力し、コントローラが AUD を境界に Access Unit を組み立てて送出する。受信側 (MediaCodec) はそのままデコーダの入力バッファに渡せる。
   - 0x02 = JPEG
   - 0x03 = RAW (定義のみ。現状のパイプラインでは使用していない予約値)
 - Flags (ビットフラグ。OR で組み合わせる):

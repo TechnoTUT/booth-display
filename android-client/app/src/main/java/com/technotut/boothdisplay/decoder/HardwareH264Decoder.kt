@@ -148,99 +148,66 @@ class HardwareH264Decoder(
     }
 
     /**
-     * Finds the H.264 NAL unit type from Annex-B formatted data.
-     * Returns -1 if no start code is found.
+     * Returns the first NAL unit of [type] found in the Annex-B buffer
+     * (including its start code), or null if absent.
      */
-    private fun findNalType(data: ByteArray): Int {
-        var offset = -1
-        if (data.size >= 4 && data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 0.toByte() && data[3] == 1.toByte()) {
-            offset = 4
-        } else if (data.size >= 3 && data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 1.toByte()) {
-            offset = 3
+    private fun extractNal(data: ByteArray, type: Int): ByteArray? {
+        var start = -1
+        var i = 0
+        while (i + 3 < data.size) {
+            val sc4 = data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()
+            val sc3 = data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()
+            if (sc4 || sc3) {
+                val hdr = if (sc4) 4 else 3
+                if (start >= 0) return data.copyOfRange(start, i)
+                if (i + hdr < data.size && (data[i + hdr].toInt() and 0x1F) == type) {
+                    start = i
+                }
+                i += hdr
+            } else {
+                i++
+            }
         }
-
-        if (offset in 0 until data.size) {
-            return data[offset].toInt() and 0x1F
-        }
-        return -1
+        return if (start >= 0) data.copyOfRange(start, data.size) else null
     }
 
-    // Access Unit (AU) accumulator for multi-slice frames
-    private val auBuffer = java.io.ByteArrayOutputStream(128 * 1024)
-    private var auTimestamp: Long = -1L
-    private var auIsKeyframe: Boolean = false
-
+    /**
+     * [data] is one complete Access Unit (all NALs of one frame: AUD, optional
+     * SPS/PPS/SEI, and every slice), exactly as framed by the controller.
+     * MediaCodec needs a whole picture per input buffer.
+     */
     fun decodeFrame(data: ByteArray, isKeyframe: Boolean, timestampMs: Long) {
         synchronized(lock) {
             val decoder = codec ?: return
             if (!isConfigured) return
 
-            val nalType = findNalType(data)
-            if (nalType == NAL_TYPE_SPS) {
-                spsBuffer = data.copyOf()
-            } else if (nalType == NAL_TYPE_PPS) {
-                ppsBuffer = data.copyOf()
-            }
+            val sps = extractNal(data, NAL_TYPE_SPS)
+            val pps = extractNal(data, NAL_TYPE_PPS)
+            if (sps != null) spsBuffer = sps
+            if (pps != null) ppsBuffer = pps
 
-            // When timestamp changes, the previous frame's slices are all collected: flush AU to decoder
-            if (auTimestamp != -1L && timestampMs != auTimestamp) {
-                flushAccessUnit(decoder)
-            }
+            val hasIdr = extractNal(data, NAL_TYPE_IDR) != null
+            val ptsUs = System.nanoTime() / 1000L
 
-            if (auTimestamp == -1L) {
-                auTimestamp = timestampMs
-                auIsKeyframe = isKeyframe
-            } else if (isKeyframe) {
-                auIsKeyframe = true
-            }
-
-            auBuffer.write(data)
-        }
-    }
-
-    private fun flushAccessUnit(decoder: MediaCodec) {
-        if (auBuffer.size() == 0) return
-        val fullAu = auBuffer.toByteArray()
-        auBuffer.reset()
-        val isKey = auIsKeyframe
-        auTimestamp = -1L
-        auIsKeyframe = false
-
-        val ptsUs = System.nanoTime() / 1000L
-
-        if (isKey) {
-            hasReceivedKeyframe = true
-            lastNalType = "IDR-AU (${fullAu.size}B)"
-            // Ensure SPS and PPS are present at the beginning of the Keyframe Access Unit
-            val payload = if (spsBuffer != null && ppsBuffer != null && !hasSpsPps(fullAu)) {
-                val sps = spsBuffer!!
-                val pps = ppsBuffer!!
-                val combined = ByteArray(sps.size + pps.size + fullAu.size)
-                System.arraycopy(sps, 0, combined, 0, sps.size)
-                System.arraycopy(pps, 0, combined, sps.size, pps.size)
-                System.arraycopy(fullAu, 0, combined, sps.size + pps.size, fullAu.size)
-                combined
+            if (hasIdr || isKeyframe) {
+                hasReceivedKeyframe = true
+                lastNalType = "IDR-AU (${data.size}B)"
+                // Make sure parameter sets travel with the keyframe even if the encoder omitted them
+                val cachedSps = spsBuffer
+                val cachedPps = ppsBuffer
+                val payload = if (sps == null && pps == null && cachedSps != null && cachedPps != null) {
+                    cachedSps + cachedPps + data
+                } else {
+                    data
+                }
+                queueInput(decoder, payload, ptsUs, MediaCodec.BUFFER_FLAG_KEY_FRAME)
             } else {
-                fullAu
+                if (!hasReceivedKeyframe) return // Drop P-frames until the first keyframe
+                lastNalType = "P-AU (${data.size}B)"
+                queueInput(decoder, data, ptsUs, 0)
             }
-            queueInput(decoder, payload, ptsUs, MediaCodec.BUFFER_FLAG_KEY_FRAME)
-        } else {
-            if (!hasReceivedKeyframe) return // Drop P-frames until first keyframe is decoded
-            lastNalType = "P-AU (${fullAu.size}B)"
-            queueInput(decoder, fullAu, ptsUs, 0)
         }
-    }
-
-    private fun hasSpsPps(data: ByteArray): Boolean {
-        var i = 0
-        while (i < data.size - 4 && i < 100) {
-            if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()) {
-                val t = data[i + 4].toInt() and 0x1F
-                if (t == NAL_TYPE_SPS) return true
-            }
-            i++
-        }
-        return false
     }
 
     private fun queueInput(decoder: MediaCodec, data: ByteArray, presentationTimeUs: Long, flags: Int) {
@@ -275,9 +242,6 @@ class HardwareH264Decoder(
             hasReceivedKeyframe = false
             spsBuffer = null
             ppsBuffer = null
-            auBuffer.reset()
-            auTimestamp = -1L
-            auIsKeyframe = false
 
             drainThread?.interrupt()
             drainThread = null

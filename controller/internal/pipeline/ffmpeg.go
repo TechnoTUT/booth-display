@@ -119,6 +119,17 @@ func (p *DisplayPipeline) Start(mode string, mediaTarget string, canvas config.C
 		}
 	}
 
+	// Receiver-friendly H.264: one slice per frame, AUD at every access unit
+	// boundary (used by readAndSendLoop to frame the stream), SPS/PPS repeated
+	// in-band, and Baseline profile for maximum hardware decoder compatibility.
+	// Inserted just before the trailing output args ("-f", "h264", "pipe:1").
+	encoderOpts := []string{
+		"-profile:v", "baseline",
+		"-x264-params", "slices=1:sliced-threads=0:aud=1:repeat-headers=1",
+	}
+	outIdx := len(args) - 3
+	args = append(args[:outIdx:outIdx], append(encoderOpts, args[outIdx:]...)...)
+
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	if inputReader != nil {
 		cmd.Stdin = inputReader
@@ -148,6 +159,7 @@ func (p *DisplayPipeline) readAndSendLoop(ctx context.Context, r io.Reader) {
 	defer p.wg.Done()
 
 	parser := NewNALUParser()
+	assembler := NewAccessUnitAssembler()
 	bufReader := bufio.NewReaderSize(r, 64*1024)
 	chunk := make([]byte, 16*1024)
 	startTime := time.Now()
@@ -166,11 +178,13 @@ func (p *DisplayPipeline) readAndSendLoop(ctx context.Context, r io.Reader) {
 			}
 
 			if n > 0 {
-				nalUnits := parser.Push(chunk[:n])
-				timestampMs := uint32(time.Since(startTime).Milliseconds())
-
-				for _, nal := range nalUnits {
-					p.sender.SendFrame(nal.Data, protocol.PayloadTypeH264, nal.IsKeyframe, timestampMs)
+				for _, nal := range parser.Push(chunk[:n]) {
+					// Send one complete Access Unit (all slices of a frame) per
+					// SendFrame call, stamped once per frame.
+					if au := assembler.Push(nal); au != nil {
+						timestampMs := uint32(time.Since(startTime).Milliseconds())
+						p.sender.SendFrame(au.Data, protocol.PayloadTypeH264, au.IsKeyframe, timestampMs)
+					}
 				}
 			}
 		}
