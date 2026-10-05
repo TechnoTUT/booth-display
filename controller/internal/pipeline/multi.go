@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -267,8 +266,7 @@ func (m *MultiEncoder) stopInternal() {
 func pumpH264(ctx context.Context, r io.Reader, id string, sender *streamer.DisplaySender) {
 	parser := NewNALUParser()
 	assembler := NewAccessUnitAssembler()
-	bufReader := bufio.NewReaderSize(r, 256*1024)
-	chunk := make([]byte, 64*1024)
+	chunk := make([]byte, 16*1024)
 	startTime := time.Now()
 
 	for {
@@ -277,7 +275,7 @@ func pumpH264(ctx context.Context, r io.Reader, id string, sender *streamer.Disp
 			return
 		default:
 		}
-		n, err := bufReader.Read(chunk)
+		n, err := r.Read(chunk)
 		if n > 0 {
 			for _, nal := range parser.Push(chunk[:n]) {
 				if au := assembler.Push(nal); au != nil {
