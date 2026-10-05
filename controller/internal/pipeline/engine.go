@@ -2,9 +2,7 @@ package pipeline
 
 import (
 	"fmt"
-	"io"
 	"sync"
-	"time"
 
 	"booth-display/controller/internal/config"
 	"booth-display/controller/internal/streamer"
@@ -106,54 +104,18 @@ func (e *PipelineEngine) Start(mode string, mediaTarget string) error {
 
 	_ = e.mixer.SwitchSource(mode, mediaTarget, TransitionCut, 0)
 
-	// Launch the single encoder process fed by mixer.Subscribe() (exclusive direct stream for ultra-low latency)
+	// Launch the single encoder process fed by mixer.Subscribe()
 	if err := e.encoder.Start(snap.Canvas, e.mixer.Subscribe()); err != nil {
 		return fmt.Errorf("failed to start encoder: %w", err)
 	}
 
-	// Start canvas preview stream using a completely decoupled, non-blocking 10fps sampler
-	previewReader := e.createPreviewSampler(snap.Canvas)
+	// Start canvas preview stream fed by mixer
+	previewReader := e.mixer.Subscribe()
 	_ = e.previewPipe.Start("raw", "", snap.Canvas, previewReader)
 
 	e.isRunning = true
 	e.activeMode = mode
 	return nil
-}
-
-// createPreviewSampler polls the latest canvas frame at 10fps without blocking the display encoder pipeline.
-func (e *PipelineEngine) createPreviewSampler(canvas config.CanvasConfig) io.ReadCloser {
-	pr, pw := io.Pipe()
-	go func() {
-		defer pw.Close()
-		w := canvas.Width
-		if w <= 0 {
-			w = 5792
-		}
-		h := canvas.Height
-		if h <= 0 {
-			h = 540
-		}
-		frameSize := w * h * 4
-		buf := make([]byte, frameSize)
-		ticker := time.NewTicker(100 * time.Millisecond) // 10fps decoupled preview
-		defer ticker.Stop()
-
-		for range ticker.C {
-			e.mu.RLock()
-			running := e.isRunning
-			m := e.mixer
-			e.mu.RUnlock()
-
-			if !running || m == nil {
-				return
-			}
-			m.GetLatestFrame(buf)
-			if _, err := pw.Write(buf); err != nil {
-				return
-			}
-		}
-	}()
-	return pr
 }
 
 // SwitchScene changes source with a transition without restarting FFmpeg encoders.

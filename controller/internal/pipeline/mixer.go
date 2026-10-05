@@ -453,13 +453,6 @@ func (m *CanvasMixer) mixerLoop(ctx context.Context) {
 	}
 }
 
-// GetLatestFrame copies the latest rendered canvas frame into dst for asynchronous, decoupled preview sampling.
-func (m *CanvasMixer) GetLatestFrame(dst []byte) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	copy(dst, m.currentFrame)
-}
-
 func (m *CanvasMixer) renderFrame(out []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
