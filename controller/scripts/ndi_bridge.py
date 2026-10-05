@@ -166,28 +166,25 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
             data_size = vf.get_data_size()
 
             if w > 0 and h > 0 and data_size > 0:
-                # Zero-copy view into frame memory buffer
+                arr = None
                 try:
+                    # Zero-copy view into frame memory buffer
                     arr = np.asarray(vf).reshape((h, w, 4))
-                except Exception:
-                    # Fallback if buffer protocol is not supported directly
-                    arr = np.frombuffer(vf, dtype=np.uint8, count=w * h * 4).reshape((h, w, 4))
 
-                if w == width and h == height:
-                    # Exact match: stream directly
-                    stdout.write(arr.data.cast('B'))
-                else:
-                    if cached_res != (w, h):
-                        cached_res = (w, h)
-                        crop_rect = calc_crop_rect(w, h, width, height, crop_mode=crop_mode)
+                    if w == width and h == height:
+                        np.copyto(out_buf, arr)
+                    else:
+                        if cached_res != (w, h):
+                            cached_res = (w, h)
+                            crop_rect = calc_crop_rect(w, h, width, height, crop_mode=crop_mode)
 
-                    cx, cy, cw, ch = crop_rect
-                    cropped = arr[cy : cy + ch, cx : cx + cw]
+                        cx, cy, cw, ch = crop_rect
+                        cv2.resize(arr[cy : cy + ch, cx : cx + cw], (width, height), dst=out_buf, interpolation=cv2.INTER_LINEAR)
+                finally:
+                    # Release view buffer immediately so next capture_video doesn't fail with 'cannot write with view active'
+                    arr = None
 
-                    # Resize directly into preallocated buffer without memory allocation
-                    cv2.resize(cropped, (width, height), dst=out_buf, interpolation=cv2.INTER_LINEAR)
-                    stdout.write(out_view)
-
+                stdout.write(out_view)
                 stdout.flush()
             else:
                 # Waiting for frame from NDI source
