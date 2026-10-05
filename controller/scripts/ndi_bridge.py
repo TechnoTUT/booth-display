@@ -60,25 +60,16 @@ def discover_sources(timeout_sec: float = 1.0) -> list[dict]:
     return result
 
 
-def crop_and_resize(arr: np.ndarray, target_width: int, target_height: int, crop_mode: str = "center") -> np.ndarray:
-    """
-    Resizes or crops input frame to target canvas size.
-    Modes:
-      - 'center': Crops input frame around center to match target aspect ratio, then resizes.
-      - 'stretch': Stretches input frame to target size without maintaining aspect ratio.
-    """
-    src_h, src_w = arr.shape[:2]
-    if src_w == target_width and src_h == target_height:
-        return arr
-
+def calc_crop_rect(src_w: int, src_h: int, target_width: int, target_height: int, crop_mode: str = "center") -> tuple[int, int, int, int]:
+    """Calculate crop coordinates (x, y, w, h) for input dimensions."""
     if crop_mode != "center":
-        return cv2.resize(arr, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+        return 0, 0, src_w, src_h
 
     src_aspect = src_w / src_h
     target_aspect = target_width / target_height
 
     if abs(src_aspect - target_aspect) < 1e-4:
-        return cv2.resize(arr, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+        return 0, 0, src_w, src_h
 
     if src_aspect < target_aspect:
         # Source is taller than target -> crop top and bottom
@@ -95,11 +86,16 @@ def crop_and_resize(arr: np.ndarray, target_width: int, target_height: int, crop
         crop_x = (src_w - crop_w) // 2
         crop_y = 0
 
-    cropped = arr[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w]
-    return cv2.resize(cropped, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+    return crop_x, crop_y, crop_w, crop_h
 
 
 def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode: str = "center"):
+    # Ensure multi-threaded OpenCV for fast parallel resizing
+    try:
+        cv2.setNumThreads(4)
+    except Exception:
+        pass
+
     # Set stdout to binary non-buffered mode
     stdout = sys.stdout.buffer
 
@@ -131,8 +127,15 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
     receiver.frame_sync.set_video_frame(vf)
     receiver.set_source(matched)
 
+    # Pre-allocate output buffer and 1D memoryview to eliminate per-frame GC allocations
+    out_buf = np.empty((height, width, 4), dtype=np.uint8)
+    out_view = out_buf.data.cast('B')
+
     frame_interval = 1.0 / max(1, fps)
-    last_frame_time = time.time()
+    next_frame_time = time.perf_counter()
+
+    cached_res: tuple[int, int] | None = None
+    crop_rect: tuple[int, int, int, int] = (0, 0, width, height)
 
     running = True
 
@@ -144,11 +147,18 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
     signal.signal(signal.SIGTERM, sig_handler)
 
     while running:
-        now = time.time()
-        elapsed = now - last_frame_time
-        if elapsed < frame_interval:
-            time.sleep(max(0.001, frame_interval - elapsed))
-            continue
+        # High-precision drift-free pacing
+        now = time.perf_counter()
+        sleep_dur = next_frame_time - now
+        if sleep_dur > 0.001:
+            time.sleep(sleep_dur - 0.0005)
+        while time.perf_counter() < next_frame_time:
+            pass
+
+        next_frame_time += frame_interval
+        # Avoid falling behind if processing is delayed
+        if next_frame_time < time.perf_counter() - frame_interval:
+            next_frame_time = time.perf_counter() + frame_interval
 
         try:
             receiver.frame_sync.capture_video()
@@ -156,26 +166,37 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
             data_size = vf.get_data_size()
 
             if w > 0 and h > 0 and data_size > 0:
-                raw_data = bytes(vf)
-                arr = np.frombuffer(raw_data, dtype=np.uint8, count=w * h * 4).reshape((h, w, 4))
+                # Zero-copy view into frame memory buffer
+                try:
+                    arr = np.asarray(vf).reshape((h, w, 4))
+                except Exception:
+                    # Fallback if buffer protocol is not supported directly
+                    arr = np.frombuffer(vf, dtype=np.uint8, count=w * h * 4).reshape((h, w, 4))
 
-                if w != width or h != height:
-                    processed = crop_and_resize(arr, width, height, crop_mode=crop_mode)
-                    out_bytes = processed.tobytes()
+                if w == width and h == height:
+                    # Exact match: stream directly
+                    stdout.write(arr.data.cast('B'))
                 else:
-                    out_bytes = raw_data
+                    if cached_res != (w, h):
+                        cached_res = (w, h)
+                        crop_rect = calc_crop_rect(w, h, width, height, crop_mode=crop_mode)
 
-                stdout.write(out_bytes)
+                    cx, cy, cw, ch = crop_rect
+                    cropped = arr[cy : cy + ch, cx : cx + cw]
+
+                    # Resize directly into preallocated buffer without memory allocation
+                    cv2.resize(cropped, (width, height), dst=out_buf, interpolation=cv2.INTER_LINEAR)
+                    stdout.write(out_view)
+
                 stdout.flush()
-                last_frame_time = time.time()
             else:
                 # Waiting for frame from NDI source
-                time.sleep(0.005)
+                time.sleep(0.002)
         except (BrokenPipeError, IOError):
             break
         except Exception as e:
             sys.stderr.write(f"[ndi_bridge] Capture error: {e}\n")
-            time.sleep(0.05)
+            time.sleep(0.01)
 
 
 def main():

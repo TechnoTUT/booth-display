@@ -85,9 +85,10 @@ type CanvasMixer struct {
 	mu           sync.RWMutex
 	currentFrame []byte
 	prevFrame    []byte
-	sourceFrame  []byte // latest frame from external source (NDI or video)
+	sourceFront  []byte // double-buffered front frame
+	sourceBack   []byte // double-buffered back frame
 	blackFrame   []byte
-	sourceMu     sync.Mutex
+	sourceMu     sync.RWMutex
 
 	// State
 	activeSource   string
@@ -129,7 +130,8 @@ func NewCanvasMixer(canvas config.CanvasConfig, displays []config.DisplayConfig)
 		logoGen:      NewLogoGenerator(canvas, displays),
 		currentFrame: make([]byte, frameSize),
 		prevFrame:    make([]byte, frameSize),
-		sourceFrame:  make([]byte, frameSize),
+		sourceFront:  make([]byte, frameSize),
+		sourceBack:   make([]byte, frameSize),
 		blackFrame:   make([]byte, frameSize),
 		activeSource: "testpattern",
 		transition:   TransitionCut,
@@ -313,22 +315,6 @@ func (m *CanvasMixer) startNDILocked(sourceName string) error {
 	}
 	m.ndiDist = dist
 
-	// Read NDI frames into m.sourceFrame
-	pipeReader := dist.Subscribe()
-	go func() {
-		bufReader := bufio.NewReaderSize(pipeReader, m.frameSize*2)
-		tempBuf := make([]byte, m.frameSize)
-		for {
-			_, err := io.ReadFull(bufReader, tempBuf)
-			if err != nil {
-				return
-			}
-			m.sourceMu.Lock()
-			copy(m.sourceFrame, tempBuf)
-			m.sourceMu.Unlock()
-		}
-	}()
-
 	return nil
 }
 
@@ -356,6 +342,7 @@ func (m *CanvasMixer) startVideoLocked(filePath string) error {
 		cancel()
 		return fmt.Errorf("failed to open video stdout: %w", err)
 	}
+	expandPipeBuffer(stdout)
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -366,14 +353,13 @@ func (m *CanvasMixer) startVideoLocked(filePath string) error {
 
 	go func() {
 		bufReader := bufio.NewReaderSize(stdout, m.frameSize*2)
-		tempBuf := make([]byte, m.frameSize)
 		for {
-			_, err := io.ReadFull(bufReader, tempBuf)
+			_, err := io.ReadFull(bufReader, m.sourceBack)
 			if err != nil {
 				return
 			}
 			m.sourceMu.Lock()
-			copy(m.sourceFrame, tempBuf)
+			m.sourceFront, m.sourceBack = m.sourceBack, m.sourceFront
 			m.sourceMu.Unlock()
 		}
 	}()
@@ -406,6 +392,7 @@ func (m *CanvasMixer) startRainbowLocked() error {
 		cancel()
 		return fmt.Errorf("failed to open testsrc stdout: %w", err)
 	}
+	expandPipeBuffer(stdout)
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -416,14 +403,13 @@ func (m *CanvasMixer) startRainbowLocked() error {
 
 	go func() {
 		bufReader := bufio.NewReaderSize(stdout, m.frameSize*2)
-		tempBuf := make([]byte, m.frameSize)
 		for {
-			_, err := io.ReadFull(bufReader, tempBuf)
+			_, err := io.ReadFull(bufReader, m.sourceBack)
 			if err != nil {
 				return
 			}
 			m.sourceMu.Lock()
-			copy(m.sourceFrame, tempBuf)
+			m.sourceFront, m.sourceBack = m.sourceBack, m.sourceFront
 			m.sourceMu.Unlock()
 		}
 	}()
@@ -477,10 +463,16 @@ func (m *CanvasMixer) renderFrame(out []byte) {
 		sourceToFetch = m.nextSource
 	}
 
-	if sourceToFetch == "ndi" || sourceToFetch == "video" || sourceToFetch == "rainbow" {
-		m.sourceMu.Lock()
-		nextRaw = m.sourceFrame
-		m.sourceMu.Unlock()
+	if sourceToFetch == "ndi" {
+		if m.ndiDist != nil && m.ndiDist.CopyLatestFrame(m.sourceFront) {
+			nextRaw = m.sourceFront
+		} else {
+			nextRaw = m.blackFrame
+		}
+	} else if sourceToFetch == "video" || sourceToFetch == "rainbow" {
+		m.sourceMu.RLock()
+		nextRaw = m.sourceFront
+		m.sourceMu.RUnlock()
 	} else if sourceToFetch == "logo" {
 		nextRaw = m.logoGen.NextFrame()
 	} else {

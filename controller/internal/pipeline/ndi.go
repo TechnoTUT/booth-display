@@ -9,6 +9,7 @@ import (
 	"log"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"booth-display/controller/internal/config"
@@ -45,7 +46,7 @@ func DiscoverNDISources() ([]NDISource, error) {
 }
 
 // NDIDistributor runs the python ndi_bridge process, reads raw BGRX frames of the target canvas,
-// and distributes each frame to multiple subscriber pipes (for displays and preview).
+// and buffers the latest frame using zero-lock double-buffering for glitch-free rendering.
 type NDIDistributor struct {
 	sourceName string
 	canvas     config.CanvasConfig
@@ -55,15 +56,41 @@ type NDIDistributor struct {
 	running    bool
 	mu         sync.Mutex
 
+	// Double-buffering for tear-free, non-blocking frame retrieval
+	frontBuf []byte
+	backBuf  []byte
+	hasFrame bool
+	bufMu    sync.RWMutex
+
 	subscribers map[io.WriteCloser]bool
 	subMu       sync.Mutex
 }
 
 func NewNDIDistributor(sourceName string, canvas config.CanvasConfig) *NDIDistributor {
+	w := canvas.Width
+	if w <= 0 {
+		w = 5792
+	}
+	h := canvas.Height
+	if h <= 0 {
+		h = 540
+	}
+	frameBytes := w * h * 4
+
 	return &NDIDistributor{
 		sourceName:  sourceName,
 		canvas:      canvas,
+		frontBuf:    make([]byte, frameBytes),
+		backBuf:     make([]byte, frameBytes),
 		subscribers: make(map[io.WriteCloser]bool),
+	}
+}
+
+// expandPipeBuffer attempts to expand the OS pipe buffer capacity on Linux to reduce context switching.
+func expandPipeBuffer(rc io.ReadCloser) {
+	if f, ok := rc.(interface{ Fd() uintptr }); ok {
+		// F_SETPIPE_SZ = 1031 on Linux, set to 512KB (safe for unprivileged user)
+		_, _, _ = syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), 1031, 524288)
 	}
 }
 
@@ -96,6 +123,7 @@ func (d *NDIDistributor) Start() error {
 		cancel()
 		return fmt.Errorf("failed to create NDI bridge stdout pipe: %w", err)
 	}
+	expandPipeBuffer(stdout)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -125,6 +153,19 @@ func (d *NDIDistributor) Start() error {
 	return nil
 }
 
+// CopyLatestFrame copies the latest received NDI frame into dst.
+// Returns true if a valid frame was copied, false if no frame has arrived yet.
+func (d *NDIDistributor) CopyLatestFrame(dst []byte) bool {
+	d.bufMu.RLock()
+	defer d.bufMu.RUnlock()
+
+	if !d.hasFrame {
+		return false
+	}
+	copy(dst, d.frontBuf)
+	return true
+}
+
 func (d *NDIDistributor) Subscribe() io.ReadCloser {
 	d.subMu.Lock()
 	defer d.subMu.Unlock()
@@ -135,27 +176,21 @@ func (d *NDIDistributor) Subscribe() io.ReadCloser {
 }
 
 func (d *NDIDistributor) Unsubscribe(r io.ReadCloser) {
-	// r is the pipe reader; subscribers contains pw
 	_ = r.Close()
 }
 
 func (d *NDIDistributor) readLoop(ctx context.Context, r io.Reader) {
 	defer d.wg.Done()
 
-	frameBytes := d.canvas.Width * d.canvas.Height * 4 // BGRX is 4 bytes per pixel
-	if frameBytes <= 0 {
-		frameBytes = 5792 * 540 * 4
-	}
-
+	frameBytes := len(d.backBuf)
 	bufReader := bufio.NewReaderSize(r, frameBytes*2)
-	frame := make([]byte, frameBytes)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			_, err := io.ReadFull(bufReader, frame)
+			_, err := io.ReadFull(bufReader, d.backBuf)
 			if err != nil {
 				if err != io.EOF && ctx.Err() == nil {
 					log.Printf("[NDIDistributor] Read frame error: %v", err)
@@ -163,13 +198,23 @@ func (d *NDIDistributor) readLoop(ctx context.Context, r io.Reader) {
 				return
 			}
 
-			// Broadcast frame to all subscribers
+			// Atomic pointer swap of double-buffered frame
+			d.bufMu.Lock()
+			d.frontBuf, d.backBuf = d.backBuf, d.frontBuf
+			d.hasFrame = true
+			d.bufMu.Unlock()
+
+			// Broadcast frame to external pipe subscribers if any
 			d.subMu.Lock()
-			for w := range d.subscribers {
-				if _, err := w.Write(frame); err != nil {
-					_ = w.Close()
-					delete(d.subscribers, w)
+			if len(d.subscribers) > 0 {
+				d.bufMu.RLock()
+				for w := range d.subscribers {
+					if _, err := w.Write(d.frontBuf); err != nil {
+						_ = w.Close()
+						delete(d.subscribers, w)
+					}
 				}
+				d.bufMu.RUnlock()
 			}
 			d.subMu.Unlock()
 		}
