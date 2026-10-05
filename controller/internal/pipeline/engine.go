@@ -57,7 +57,8 @@ func (e *PipelineEngine) newEncoder(displays []config.DisplayConfig) *MultiEncod
 			senders = append(senders, sender)
 		}
 	}
-	return NewMultiEncoder(ds, senders)
+	snap := e.cfgPool.GetSnapshot()
+	return NewMultiEncoder(ds, senders, snap.Pipeline)
 }
 
 // Start launches streaming for all configured displays through CanvasMixer.

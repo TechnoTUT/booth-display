@@ -37,13 +37,19 @@ type MediaConfig struct {
 	VideoFile   string `yaml:"video_file" json:"video_file"`
 }
 
+type PipelineConfig struct {
+	Encoder     string `yaml:"encoder" json:"encoder"`           // "auto", "vaapi", "software"
+	VAAPIDevice string `yaml:"vaapi_device" json:"vaapi_device"` // default: "/dev/dri/renderD128"
+}
+
 type Config struct {
 	Server   ServerConfig    `yaml:"server" json:"server"`
 	Canvas   CanvasConfig    `yaml:"canvas" json:"canvas"`
 	Displays []DisplayConfig `yaml:"displays" json:"displays"`
 	Media    MediaConfig     `yaml:"media" json:"media"`
+	Pipeline PipelineConfig  `yaml:"pipeline" json:"pipeline"`
 
-	filePath string     `yaml:"-" json:"-"`
+	filePath string       `yaml:"-" json:"-"`
 	mu       sync.RWMutex `yaml:"-" json:"-"`
 }
 
@@ -72,6 +78,12 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Media.DefaultMode == "" {
 		cfg.Media.DefaultMode = "testpattern"
 	}
+	if cfg.Pipeline.Encoder == "" {
+		cfg.Pipeline.Encoder = "auto"
+	}
+	if cfg.Pipeline.VAAPIDevice == "" {
+		cfg.Pipeline.VAAPIDevice = "/dev/dri/renderD128"
+	}
 
 	return cfg, nil
 }
@@ -81,10 +93,17 @@ func (c *Config) GetSnapshot() Config {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	cp := *c
-	cp.Displays = make([]DisplayConfig, len(c.Displays))
-	copy(cp.Displays, c.Displays)
-	return cp
+	displays := make([]DisplayConfig, len(c.Displays))
+	copy(displays, c.Displays)
+
+	return Config{
+		Server:   c.Server,
+		Canvas:   c.Canvas,
+		Displays: displays,
+		Media:    c.Media,
+		Pipeline: c.Pipeline,
+		filePath: c.filePath,
+	}
 }
 
 // Save persists the current configuration back to disk.

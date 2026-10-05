@@ -36,7 +36,7 @@ func (h *APIHandler) HandleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 	snap := h.cfg.GetSnapshot()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(snap)
+	_ = json.NewEncoder(w).Encode(&snap)
 }
 
 type UpdateConfigRequest struct {

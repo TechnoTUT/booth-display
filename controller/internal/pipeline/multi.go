@@ -22,11 +22,12 @@ import (
 // to its own H.264 elementary stream. Every encoded stream is delivered to the
 // matching display sender through an extra pipe (fd 3, 4, ...).
 //
-// Compared with one ffmpeg per display this transfers the 12MB/frame canvas
-// over the stdin pipe once instead of once per display.
+// Supports both Intel VA-API hardware encoding (h264_vaapi) for ultra-low CPU
+// usage and software encoding (libx264) with automatic fallback.
 type MultiEncoder struct {
-	displays []config.DisplayConfig
-	senders  []*streamer.DisplaySender
+	displays    []config.DisplayConfig
+	senders     []*streamer.DisplaySender
+	pipelineCfg config.PipelineConfig
 
 	cancelFn context.CancelFunc
 	cmd      *exec.Cmd
@@ -35,12 +36,37 @@ type MultiEncoder struct {
 	mu       sync.Mutex
 }
 
-func NewMultiEncoder(displays []config.DisplayConfig, senders []*streamer.DisplaySender) *MultiEncoder {
-	return &MultiEncoder{displays: displays, senders: senders}
+func NewMultiEncoder(displays []config.DisplayConfig, senders []*streamer.DisplaySender, pipelineCfg config.PipelineConfig) *MultiEncoder {
+	return &MultiEncoder{
+		displays:    displays,
+		senders:     senders,
+		pipelineCfg: pipelineCfg,
+	}
 }
 
-// buildMultiArgs builds the ffmpeg arguments for a single-process, N-output encode.
-func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig) []string {
+// determineEncoder decides whether to use VA-API based on config and device presence.
+func determineEncoder(cfg config.PipelineConfig) (useVAAPI bool, device string) {
+	device = cfg.VAAPIDevice
+	if device == "" {
+		device = "/dev/dri/renderD128"
+	}
+
+	enc := strings.ToLower(cfg.Encoder)
+	switch enc {
+	case "software", "x264", "libx264", "cpu":
+		return false, ""
+	case "vaapi", "hw", "gpu":
+		return true, device
+	default: // "auto" or empty
+		if _, err := os.Stat(device); err == nil {
+			return true, device
+		}
+		return false, ""
+	}
+}
+
+// buildMultiArgs builds the ffmpeg arguments for single-process, N-output encode.
+func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig, useVAAPI bool, vaDevice string) []string {
 	fps := canvas.FPS
 	if fps <= 0 {
 		fps = 30
@@ -52,38 +78,74 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig)
 	for i := range displays {
 		fmt.Fprintf(&fc, "[s%d]", i)
 	}
-	for i, d := range displays {
-		fmt.Fprintf(&fc, ";[s%d]crop=%d:%d:%d:%d[o%d]", i, d.Width, d.Height, d.CropX, d.CropY, i)
-	}
 
-	args := []string{
-		"-hide_banner", "-loglevel", "error",
-		"-f", "rawvideo",
-		"-pix_fmt", "bgr0",
-		"-s", fmt.Sprintf("%dx%d", canvas.Width, canvas.Height),
-		"-r", fmt.Sprintf("%d", fps),
-		"-i", "pipe:0",
-		"-filter_complex", fc.String(),
-	}
-	for i := range displays {
-		args = append(args,
-			"-map", fmt.Sprintf("[o%d]", i),
-			"-c:v", "libx264",
-			"-preset", "ultrafast",
-			"-tune", "zerolatency",
-			"-pix_fmt", "yuv420p",
-			"-b:v", "4000k",
-			"-maxrate", "4000k",
-			"-bufsize", "1000k",
-			"-g", fmt.Sprintf("%d", fps),
-			// Receiver-friendly H.264: one slice per frame, AUD at every access
-			// unit boundary, in-band SPS/PPS, Baseline profile.
-			"-profile:v", "baseline",
-			"-x264-params", "slices=1:sliced-threads=0:aud=1:repeat-headers=1",
-			"-an",
-			"-f", "h264",
-			fmt.Sprintf("pipe:%d", 3+i),
-		)
+	var args []string
+	if useVAAPI {
+		for i, d := range displays {
+			fmt.Fprintf(&fc, ";[s%d]crop=%d:%d:%d:%d,format=nv12,hwupload[o%d]", i, d.Width, d.Height, d.CropX, d.CropY, i)
+		}
+
+		args = []string{
+			"-hide_banner", "-loglevel", "error",
+			"-init_hw_device", fmt.Sprintf("vaapi=va:%s", vaDevice),
+			"-filter_hw_device", "va",
+			"-f", "rawvideo",
+			"-pix_fmt", "bgr0",
+			"-s", fmt.Sprintf("%dx%d", canvas.Width, canvas.Height),
+			"-r", fmt.Sprintf("%d", fps),
+			"-i", "pipe:0",
+			"-filter_complex", fc.String(),
+		}
+		for i := range displays {
+			args = append(args,
+				"-map", fmt.Sprintf("[o%d]", i),
+				"-c:v", "h264_vaapi",
+				"-profile:v", "constrained_baseline",
+				"-aud", "1",
+				"-bf", "0",
+				"-g", fmt.Sprintf("%d", fps),
+				"-b:v", "4000k",
+				"-maxrate", "4000k",
+				"-bufsize", "1000k",
+				"-an",
+				"-f", "h264",
+				fmt.Sprintf("pipe:%d", 3+i),
+			)
+		}
+	} else {
+		for i, d := range displays {
+			fmt.Fprintf(&fc, ";[s%d]crop=%d:%d:%d:%d[o%d]", i, d.Width, d.Height, d.CropX, d.CropY, i)
+		}
+
+		args = []string{
+			"-hide_banner", "-loglevel", "error",
+			"-f", "rawvideo",
+			"-pix_fmt", "bgr0",
+			"-s", fmt.Sprintf("%dx%d", canvas.Width, canvas.Height),
+			"-r", fmt.Sprintf("%d", fps),
+			"-i", "pipe:0",
+			"-filter_complex", fc.String(),
+		}
+		for i := range displays {
+			args = append(args,
+				"-map", fmt.Sprintf("[o%d]", i),
+				"-c:v", "libx264",
+				"-preset", "ultrafast",
+				"-tune", "zerolatency",
+				"-pix_fmt", "yuv420p",
+				"-b:v", "4000k",
+				"-maxrate", "4000k",
+				"-bufsize", "1000k",
+				"-g", fmt.Sprintf("%d", fps),
+				// Receiver-friendly H.264: one slice per frame, AUD at every access
+				// unit boundary, in-band SPS/PPS, Baseline profile.
+				"-profile:v", "baseline",
+				"-x264-params", "slices=1:sliced-threads=0:aud=1:repeat-headers=1",
+				"-an",
+				"-f", "h264",
+				fmt.Sprintf("pipe:%d", 3+i),
+			)
+		}
 	}
 	return args
 }
@@ -100,8 +162,24 @@ func (m *MultiEncoder) Start(canvas config.CanvasConfig, inputReader io.Reader) 
 		return nil
 	}
 
+	useVAAPI, vaDevice := determineEncoder(m.pipelineCfg)
+	if useVAAPI {
+		log.Printf("[MultiEncoder] Starting hardware encoder: VA-API (%s)", vaDevice)
+		err := m.startProcess(canvas, inputReader, true, vaDevice)
+		if err == nil {
+			return nil
+		}
+		log.Printf("[MultiEncoder] VA-API hardware encoding failed: %v. Falling back to software libx264.", err)
+	}
+
+	log.Printf("[MultiEncoder] Starting software encoder: libx264 (ultrafast)")
+	return m.startProcess(canvas, inputReader, false, "")
+}
+
+func (m *MultiEncoder) startProcess(canvas config.CanvasConfig, inputReader io.Reader, useVAAPI bool, vaDevice string) error {
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "ffmpeg", buildMultiArgs(canvas, m.displays)...)
+	args := buildMultiArgs(canvas, m.displays, useVAAPI, vaDevice)
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdin = inputReader
 	cmd.Stderr = os.Stderr
 

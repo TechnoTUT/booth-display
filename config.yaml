@@ -37,3 +37,6 @@ displays:
 media:
     default_mode: testpattern
     video_file: ""
+pipeline:
+    encoder: auto # "auto", "vaapi", or "software"
+    vaapi_device: /dev/dri/renderD128
