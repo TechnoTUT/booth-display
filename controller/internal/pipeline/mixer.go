@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"booth-display/controller/internal/config"
@@ -31,8 +32,31 @@ type SceneStatus struct {
 	Progress     float64        `json:"progress"` // 0.0 to 1.0
 }
 
+// sharedFrame is a reference-counted frame buffer shared read-only between
+// all subscribers and recycled through the mixer's pool.
+type sharedFrame struct {
+	data []byte
+	refs atomic.Int32
+	pool *sync.Pool
+}
+
+func (f *sharedFrame) retain() { f.refs.Add(1) }
+
+func (f *sharedFrame) release() {
+	if f.refs.Add(-1) == 0 {
+		f.pool.Put(f)
+	}
+}
+
+// getFrame returns a pooled frame owned by the caller (refcount 1).
+func (m *CanvasMixer) getFrame() *sharedFrame {
+	f := m.framePool.Get().(*sharedFrame)
+	f.refs.Store(1)
+	return f
+}
+
 type mixerSubscriber struct {
-	ch chan []byte
+	ch chan *sharedFrame
 	pw *io.PipeWriter
 }
 
@@ -48,6 +72,7 @@ type CanvasMixer struct {
 	// Subscribers (Display pipelines & preview)
 	subscribers map[*mixerSubscriber]bool
 	subMu       sync.Mutex
+	framePool   sync.Pool
 
 	// Source generators & active processes
 	testPattern *TestPatternGenerator
@@ -57,12 +82,12 @@ type CanvasMixer struct {
 	videoCancel context.CancelFunc
 
 	// Frame buffers
-	mu             sync.RWMutex
-	currentFrame   []byte
-	prevFrame      []byte
-	sourceFrame    []byte // latest frame from external source (NDI or video)
-	blackFrame     []byte
-	sourceMu       sync.Mutex
+	mu           sync.RWMutex
+	currentFrame []byte
+	prevFrame    []byte
+	sourceFrame  []byte // latest frame from external source (NDI or video)
+	blackFrame   []byte
+	sourceMu     sync.Mutex
 
 	// State
 	activeSource   string
@@ -109,6 +134,10 @@ func NewCanvasMixer(canvas config.CanvasConfig, displays []config.DisplayConfig)
 		activeSource: "testpattern",
 		transition:   TransitionCut,
 		duration:     500 * time.Millisecond,
+	}
+
+	mixer.framePool.New = func() any {
+		return &sharedFrame{data: make([]byte, frameSize), pool: &mixer.framePool}
 	}
 
 	return mixer
@@ -162,7 +191,7 @@ func (m *CanvasMixer) Subscribe() io.ReadCloser {
 
 	pr, pw := io.Pipe()
 	sub := &mixerSubscriber{
-		ch: make(chan []byte, 2),
+		ch: make(chan *sharedFrame, 2),
 		pw: pw,
 	}
 	m.subscribers[sub] = true
@@ -171,7 +200,9 @@ func (m *CanvasMixer) Subscribe() io.ReadCloser {
 	go func() {
 		defer pw.Close()
 		for frame := range sub.ch {
-			if _, err := pw.Write(frame); err != nil {
+			_, err := pw.Write(frame.data)
+			frame.release()
+			if err != nil {
 				return
 			}
 		}
@@ -424,15 +455,14 @@ func (m *CanvasMixer) mixerLoop(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	outFrame := make([]byte, m.frameSize)
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.renderFrame(outFrame)
-			m.broadcastFrame(outFrame)
+			f := m.getFrame()
+			m.renderFrame(f.data)
+			m.broadcastFrame(f)
 		}
 	}
 }
@@ -512,19 +542,20 @@ func (m *CanvasMixer) renderFrame(out []byte) {
 	copy(m.currentFrame, out)
 }
 
-func (m *CanvasMixer) broadcastFrame(frame []byte) {
+// broadcastFrame fans a single shared, ref-counted frame out to all subscribers
+// (no per-subscriber copy). The mixer's own reference is released on return.
+func (m *CanvasMixer) broadcastFrame(f *sharedFrame) {
 	m.subMu.Lock()
 	defer m.subMu.Unlock()
 
 	for sub := range m.subscribers {
-		// Non-blocking send: copy frame to avoid race condition with mixerLoop
-		frameCopy := make([]byte, len(frame))
-		copy(frameCopy, frame)
-
+		f.retain()
 		select {
-		case sub.ch <- frameCopy:
+		case sub.ch <- f:
 		default:
 			// Consumer queue full, drop frame to maintain realtime rate
+			f.release()
 		}
 	}
+	f.release()
 }
