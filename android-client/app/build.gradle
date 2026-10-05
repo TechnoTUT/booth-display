@@ -11,8 +11,8 @@ android {
         applicationId = "com.technotut.boothdisplay"
         minSdk = 25  // Android 7.1 (LG LD290EJS-FPN1 native OS)
         targetSdk = 34
-        versionCode = 8
-        versionName = "1.0.7"
+        versionCode = 9
+        versionName = "1.0.8"
     }
 
     buildTypes {
