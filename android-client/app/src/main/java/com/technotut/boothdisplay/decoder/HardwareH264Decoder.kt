@@ -19,7 +19,7 @@ class HardwareH264Decoder(
     companion object {
         private const val TAG = "HardwareH264Decoder"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
-        private const val TIMEOUT_US = 5000L
+        private const val TIMEOUT_US = 10000L
 
         private const val NAL_TYPE_NON_IDR = 1
         private const val NAL_TYPE_IDR = 5
@@ -177,12 +177,16 @@ class HardwareH264Decoder(
                 NAL_TYPE_SPS -> {
                     lastNalType = "SPS (${data.size}B)"
                     spsBuffer = data.copyOf()
+                    // Submit SPS as codec configuration data to MediaCodec
+                    queueInput(decoder, data, 0L, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
                     return
                 }
 
                 NAL_TYPE_PPS -> {
                     lastNalType = "PPS (${data.size}B)"
                     ppsBuffer = data.copyOf()
+                    // Submit PPS as codec configuration data to MediaCodec
+                    queueInput(decoder, data, 0L, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
                     return
                 }
 
@@ -193,19 +197,8 @@ class HardwareH264Decoder(
 
                 NAL_TYPE_IDR -> {
                     lastNalType = "IDR (${data.size}B)"
-                    val sps = spsBuffer
-                    val pps = ppsBuffer
-                    val payload = if (sps != null && pps != null) {
-                        val combined = ByteArray(sps.size + pps.size + data.size)
-                        System.arraycopy(sps, 0, combined, 0, sps.size)
-                        System.arraycopy(pps, 0, combined, sps.size, pps.size)
-                        System.arraycopy(data, 0, combined, sps.size + pps.size, data.size)
-                        combined
-                    } else {
-                        data
-                    }
                     hasReceivedKeyframe = true
-                    queueInput(decoder, payload, ptsUs, MediaCodec.BUFFER_FLAG_KEY_FRAME)
+                    queueInput(decoder, data, ptsUs, MediaCodec.BUFFER_FLAG_KEY_FRAME)
                     return
                 }
 
@@ -243,6 +236,9 @@ class HardwareH264Decoder(
                 }
                 inputBuffer?.put(data)
                 decoder.queueInputBuffer(inIndex, 0, data.size, presentationTimeUs, flags)
+                if (lastError == "Input buf full") {
+                    lastError = null
+                }
             } else {
                 lastError = "Input buf full"
                 Log.w(TAG, "Input buffer full, dropping frame")
