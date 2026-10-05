@@ -9,7 +9,8 @@
 - Go: 1.26 以上 (`controller/go.mod` の `go 1.26.7` に準拠)
 - Node.js: v20 以上
 - uv: Python パッケージマネージャ
-- FFmpeg: libx264 有効ビルド
+- FFmpeg: 6.0 以上 (`libx264` 有効、VA-API 利用時は `h264_vaapi` 有効)
+- Intel VA-API ドライバ (`intel-media-driver` / `libva-utils` 等)
 - JDK 17 以上 / Android SDK (Android クライアントのビルド時)
 - NDI ライブラリ: cyndilib 仮想環境 (リポジトリ直下の `.venv`。`make setup-python` で作成)
 
@@ -44,6 +45,15 @@
 
 ### (4) NDI プロセスと終了処理
 - `cyndilib` は内部で C 言語の NDI ランタイムスレッドを保持しているため、Python プロセス終了時に標準の終了フックでデッドロックする場合があります。そのため、ブリッジスクリプト (`controller/scripts/ndi_bridge.py`) では明示的な `os._exit(0)` による高速プロセス終了を行っています。
+
+### (5) ハードウェアアクセラレーション (VA-API) とパーミッション
+- コントローラは起動時、`/dev/dri/renderD128` などの GPU レンダリングノードの存在を検知し、Intel VA-API によるハードウェアエンコードを自動選択します。
+- 実行ユーザに GPU デバイスへのアクセス権限限がない場合（パーミッションエラー等）や、非 Intel GPU 環境では自動的に CPU ソフトウェアエンコード (`libx264` ultrafast) にフォールバックします。
+- Linux 環境で一般ユーザとして VA-API を利用する場合、ユーザを `render` または `video` グループに所属させてください。
+  ```bash
+  sudo usermod -aG render $USER
+  ```
+
 
 ---
 

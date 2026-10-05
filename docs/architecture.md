@@ -22,7 +22,7 @@ flowchart TB
         end
 
         CanvasEngine["仮想キャンバス &<br/>クロップ分割エンジン"]
-        EncoderPool["低遅延エンコーダ群<br/>(x264 zerolatency)"]
+        EncoderPool["マルチ出力統合エンコーダ (MultiEncoder)<br/>(Intel VA-API / x264 zerolatency)"]
         StreamServer["ストリーミング送出サーバ<br/>(UDP Server)"]
         PreviewHub["MJPEG プレビューハブ<br/>(/api/preview/mjpeg)"]
         
@@ -63,16 +63,20 @@ flowchart TB
 
 ### (1) パイプライン構成
 - 入力ソース処理:
-  - 内蔵テストパターン（FFmpeg lavfi testsrc）
+  - 内蔵テストパターン（Go ネイティブ生成）
   - ローカル動画ファイル（MP4 / H.264）
   - NDIネットワーク映像（Python cyndilib / uv による rawvideo パイプ受信）
-- キャンバス分割 (Crop / Slicing):
-  - 仮想キャンバス全体のフレームから、各ディスプレイの設定座標（X, Y, W, H）に従ってサブ矩形を抽出。
-  - ベゼル（額縁）補正分を考慮したオフセット計算を適用。
-- 個別エンコード & パケット化:
-  - 切り出した各画面のフレームを低遅延エンコーダ（CPU x264 preset=ultrafast, tune=zerolatency）へ投入。
-  - Annex-B H.264 NALユニットを16バイトのカスタムヘッダ付きUDPパケットにフラグメント分割。
-- UDP送出:
+- 仮想キャンバスミキサー (`CanvasMixer`):
+  - 30fpsの一定周期でフレームを合成・トランジション（カット、クロスフェード、黒転換）処理。
+  - バッファプール（`sync.Pool`）と参照カウント方式により、購読者ごとのメモリコピーを排除（ゼロコピー配信）。
+- 単一プロセス統合エンコード (`MultiEncoder`):
+  - 1つのFFmpegプロセスに全体キャンバス (5760x540) の rawvideo を1系統のみ入力。
+  - `split` および `crop` フィルタで各ディスプレイ領域へ分割。
+  - **ハードウェア支援 (Intel VA-API)**: `/dev/dri/renderD128` が利用可能な場合、`format=nv12,hwupload` を経由して `h264_vaapi`（Constrained Baseline, AUD有効, Bフレームなし）で低遅延・超低CPU負荷エンコード。
+  - **ソフトウェアフォールバック**: VA-API 非搭載または初期化失敗時は自動で `libx264`（ultrafast, zerolatency）にフォールバック。
+  - 各画面の出力は追加パイプディスクリプタ (`pipe:3`, `pipe:4`, ...) 経由で独立ゴルーチンへ送出。
+- パケット化 & UDP送出:
+  - Annex-B H.264 NALユニットを解析し、Access Unit (フレーム) 単位で16バイトのカスタムヘッダ付きUDPパケットにフラグメント分割。
   - 宛先ディスプレイのIPおよびポートへ非同期UDP送出。
 
 ### (2) Web-GUI & API管理

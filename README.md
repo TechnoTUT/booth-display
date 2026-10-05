@@ -11,15 +11,56 @@ Web-GUIを内包したスタンドアロン単一バイナリとして動作し�
 
 ## 必要要件
 
-- OS: Linux (Debian 12+, Ubuntu 22.04+, Fedora 39+ など)
+- OS: Linux (Debian 12+, Ubuntu 22.04+, AlmaLinux / RHEL 9+, Fedora 39+ など)
 - Go: 1.26 以上
 - Node.js: 20 以上
-- FFmpeg: 6.0 以上 (libx264 有効)
+- FFmpeg: 6.0 以上 (`libx264` 有効、Intel GPU 利用時は `h264_vaapi` 有効)
+- Intel VA-API ドライバ (推奨: 第6世代 Skylake 以降の Intel CPU 内蔵グラフィックスで低CPU負荷・高速エンコードを実現)
 - uv: Python パッケージマネージャ (NDI 入力利用時、およびクライアントシミュレータ利用時)
 - (Android クライアントをビルドする場合)
   - JDK 17 以上
   - Android SDK (`platforms;android-34`, `build-tools;34.0.0`)
   - SDK の場所を `android-client/local.properties` の `sdk.dir=...` または環境変数 `ANDROID_HOME` で指定
+
+---
+
+## FFmpeg & ハードウェア支援 (VA-API) セットアップ
+
+コントローラは、Intel CPU 内蔵グラフィックス (Intel HD / UHD Graphics) の **VA-API (`h264_vaapi`)** によるハードウェア支援エンコードに対応しています。CPU 負荷を最小限に抑え、複数ディスプレイへの 30fps 同時リアルタイム送出を安定化できます（VA-API 非搭載環境では自動的に CPU ソフトウェアエンコード `libx264` にフォールバックします）。
+
+### 1. パッケージのインストール
+
+#### AlmaLinux / Rocky Linux / RHEL / Fedora
+```bash
+# RPM Fusion / EPEL リポジトリの有効化 (未導入の場合)
+sudo dnf install -y epel-release
+sudo dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm
+
+# FFmpeg および VA-API ドライバ・診断ツールのインストール
+sudo dnf install -y ffmpeg libva-utils intel-media-driver
+```
+
+#### Ubuntu / Debian
+```bash
+sudo apt update
+sudo apt install -y ffmpeg vainfo intel-media-va-driver-non-free
+# (オープンソース版ドライバを利用する場合は intel-media-driver または intel-media-va-driver)
+```
+
+### 2. 動作確認
+
+```bash
+# VA-API デバイスが認識されているか確認 (renderD128 等が存在すること)
+ls -l /dev/dri/renderD*
+
+# H.264 エンコード (VAEntrypointEncSlice) に対応しているか確認
+vainfo
+
+# FFmpeg が VA-API エンコーダに対応しているか確認
+ffmpeg -hide_banner -encoders | grep h264_vaapi
+```
+
+> **Note**: 実行ユーザが `/dev/dri/renderD128` にアクセス権を持つ必要があります（必要に応じて `sudo usermod -aG render $USER` または `video` グループに追加して再ログインしてください）。
 
 ---
 
@@ -160,6 +201,10 @@ displays:
 media:
   default_mode: "testpattern" # "testpattern", "video", または "ndi"
   video_file: ""
+
+pipeline:
+  encoder: "auto" # "auto" (VA-API優先・自動フォールバック), "vaapi", または "software"
+  vaapi_device: "/dev/dri/renderD128" # VA-API デバイスノード
 ```
 
 ---
