@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import http.server
 import io
+import json
 import socket
 import struct
 import sys
@@ -55,27 +56,33 @@ class FrameAssembler:
             return
         seq, ts, frag_idx, frag_total = struct.unpack("!IIHH", data[4:16])
         payload = data[16:]
+        is_key = bool(flags & 0x02)
+        is_marker = bool(flags & 0x01)
 
-        # Single-packet NALU (not fragmented)
+        # Single-packet Access Unit (not fragmented)
         if frag_total <= 1:
-            self.callback(payload, bool(flags & 0x02), ts)
+            self.callback(payload, is_key, ts)
             return
 
-        # Fragmented NALU: calculate the base sequence number for this NALU
+        # Fragmented Access Unit: calculate the base sequence number for this AU
         seq_base = seq - frag_idx
         if seq_base != self.current_seq_base:
             self.current_seq_base = seq_base
             self.expected_frags = frag_total
             self.received_frags = 0
-            self.is_keyframe = bool(flags & 0x02)
+            self.is_keyframe = is_key
             self.current_ts = ts
             self.fragments.clear()
+
+        if is_key:
+            self.is_keyframe = True
 
         if frag_idx not in self.fragments:
             self.fragments[frag_idx] = payload
             self.received_frags += 1
 
-        if self.received_frags == self.expected_frags and self.expected_frags > 0:
+        # Check completion either by receiving all expected fragments or by marker flag
+        if self.expected_frags > 0 and (self.received_frags == self.expected_frags or (is_marker and len(self.fragments) == frag_total)):
             ordered = [self.fragments[i] for i in range(self.expected_frags) if i in self.fragments]
             if len(ordered) == self.expected_frags:
                 full_frame = b"".join(ordered)
@@ -95,10 +102,12 @@ class SimulatorState:
         self.latest_jpeg: Optional[bytes] = None
         self.fps = 0.0
         self.frames_received = 0
+        self.packets_received = 0
         self.bytes_received = 0
         self.last_ts = 0
+        self.last_nal_type = "None"
         self.show_osd = True
-        self.last_frame_time = time.time()
+        self.last_frame_time = 0.0
 
 
 class StreamingHandler(http.server.BaseHTTPRequestHandler):
@@ -222,22 +231,51 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
       </div>
 
       <!-- Quick Metrics Strip -->
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 text-xs">
+      <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2 text-xs">
         <div class="bg-slate-50 dark:bg-slate-950/60 p-3 rounded-xl border border-slate-200 dark:border-slate-800/80">
           <span class="text-slate-500 dark:text-slate-400 block text-[10px] font-semibold uppercase">Resolution</span>
           <span class="font-mono font-bold text-slate-900 dark:text-slate-100">1920 &times; 540 px</span>
         </div>
         <div class="bg-slate-50 dark:bg-slate-950/60 p-3 rounded-xl border border-slate-200 dark:border-slate-800/80">
-          <span class="text-slate-500 dark:text-slate-400 block text-[10px] font-semibold uppercase">Aspect Ratio</span>
-          <span class="font-mono font-bold text-slate-900 dark:text-slate-100">32:9 Bar Type</span>
+          <span class="text-slate-500 dark:text-slate-400 block text-[10px] font-semibold uppercase">Protocol</span>
+          <span class="font-mono font-bold text-sky-600 dark:text-sky-400">H.264 Access Unit</span>
         </div>
         <div class="bg-slate-50 dark:bg-slate-950/60 p-3 rounded-xl border border-slate-200 dark:border-slate-800/80">
-          <span class="text-slate-500 dark:text-slate-400 block text-[10px] font-semibold uppercase">Protocol</span>
-          <span class="font-mono font-bold text-sky-600 dark:text-sky-400">UDP Annex-B (H.264)</span>
+          <span class="text-slate-500 dark:text-slate-400 block text-[10px] font-semibold uppercase">Frames / Packets</span>
+          <span id="framesBadge" class="font-mono font-bold text-slate-900 dark:text-slate-100 tabular-nums">0 / 0</span>
+        </div>
+        <div class="bg-slate-50 dark:bg-slate-950/60 p-3 rounded-xl border border-slate-200 dark:border-slate-800/80">
+          <span class="text-slate-500 dark:text-slate-400 block text-[10px] font-semibold uppercase">Stream Status</span>
+          <span id="statusBadge" class="font-mono font-bold text-amber-500 tabular-nums">Standby</span>
         </div>
       </div>
     </div>
   </main>
+
+  <script>
+    setInterval(async () => {{
+      try {{
+        const res = await fetch('/api/status');
+        if (res.ok) {{
+          const d = await res.json();
+          const fpsEl = document.getElementById('fpsBadge');
+          if (fpsEl) fpsEl.textContent = d.fps.toFixed(1);
+          const framesEl = document.getElementById('framesBadge');
+          if (framesEl) framesEl.textContent = `${{d.frames_received}} / ${{d.packets_received}}`;
+          const statusEl = document.getElementById('statusBadge');
+          if (statusEl) {{
+            if (d.active) {{
+              statusEl.textContent = 'Active (' + d.last_nal_type + ')';
+              statusEl.className = 'font-mono font-bold text-emerald-500 tabular-nums';
+            }} else {{
+              statusEl.textContent = 'Standby';
+              statusEl.className = 'font-mono font-bold text-amber-500 tabular-nums';
+            }}
+          }}
+        }}
+      }} catch (e) {{}}
+    }}, 1000);
+  </script>
 
   <!-- Footer -->
   <footer class="border-t border-slate-200 dark:border-slate-800/80 py-4 px-6 text-center text-xs text-slate-500 dark:text-slate-400">
@@ -246,6 +284,29 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
 </body>
 </html>"""
             self.wfile.write(html.encode("utf-8"))
+            return
+
+        if self.path == "/api/status":
+            now = time.time()
+            with self.state.lock:
+                data = {
+                    "display_id": self.state.display_id,
+                    "udp_port": self.state.udp_port,
+                    "fps": round(self.state.fps, 1),
+                    "frames_received": self.state.frames_received,
+                    "packets_received": self.state.packets_received,
+                    "bytes_received": self.state.bytes_received,
+                    "last_ts": self.state.last_ts,
+                    "last_nal_type": self.state.last_nal_type,
+                    "active": (now - self.state.last_frame_time < 2.0) if self.state.last_frame_time > 0 else False,
+                }
+            resp = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(resp)
             return
 
         if self.path == "/stream.mjpg":
@@ -296,6 +357,29 @@ def create_standby_frame(state: SimulatorState) -> bytes:
     return jpeg.tobytes()
 
 
+def detect_au_nal_types(data: bytes) -> str:
+    types = []
+    i = 0
+    while i < len(data) - 4:
+        if data[i:i+3] == b"\x00\x00\x01":
+            nal_type = data[i+3] & 0x1F
+            types.append(nal_type)
+            i += 4
+        elif data[i:i+4] == b"\x00\x00\x00\x01":
+            nal_type = data[i+4] & 0x1F
+            types.append(nal_type)
+            i += 5
+        else:
+            i += 1
+    if not types:
+        return "Unknown"
+    labels = []
+    type_names = {1: "P", 5: "IDR", 7: "SPS", 8: "PPS", 9: "AUD"}
+    for t in types:
+        labels.append(type_names.get(t, f"NAL-{t}"))
+    return "+".join(labels)
+
+
 def udp_worker(state: SimulatorState):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -310,6 +394,8 @@ def udp_worker(state: SimulatorState):
         nonlocal frame_count, last_calc
         state.bytes_received += len(full_frame)
         state.frames_received += 1
+        state.last_ts = ts
+        state.last_nal_type = detect_au_nal_types(full_frame)
         frame_count += 1
 
         now = time.time()
@@ -331,11 +417,11 @@ def udp_worker(state: SimulatorState):
 
                         # Render small OSD badge
                         if state.show_osd and time.time() - state.last_frame_time < 5.0:
-                            cv2.rectangle(bgr, (20, 20), (450, 75), (0, 0, 0), -1)
-                            cv2.putText(bgr, f"{state.display_id} | {state.fps:.1f} FPS", (30, 45),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                            cv2.putText(bgr, f"1920x540 | UDP :{state.udp_port}", (30, 65),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+                            cv2.rectangle(bgr, (20, 20), (520, 80), (0, 0, 0), -1)
+                            cv2.putText(bgr, f"{state.display_id} | {state.fps:.1f} FPS | {state.last_nal_type}", (30, 45),
+                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                            cv2.putText(bgr, f"1920x540 | UDP :{state.udp_port} | TS: {state.last_ts}ms", (30, 70),
+                                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
                         _, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
                         with state.lock:
@@ -350,10 +436,11 @@ def udp_worker(state: SimulatorState):
     while True:
         try:
             data, _ = sock.recvfrom(2048)
+            state.packets_received += 1
             assembler.on_packet(data)
         except socket.timeout:
             # Standby if no packets received for 2 seconds
-            if time.time() - state.last_frame_time > 2.0:
+            if state.last_frame_time > 0 and time.time() - state.last_frame_time > 2.0:
                 with state.lock:
                     state.latest_jpeg = create_standby_frame(state)
         except Exception:
