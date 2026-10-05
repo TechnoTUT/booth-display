@@ -433,7 +433,7 @@ func (m *CanvasMixer) stopExternalSourcesLocked() {
 	}
 }
 
-// mixerLoop outputs frames at a strict frame rate (e.g. 30fps)
+// mixerLoop outputs frames driven by NDI frame arrival (zero latency) or timer ticker.
 func (m *CanvasMixer) mixerLoop(ctx context.Context) {
 	defer m.wg.Done()
 
@@ -442,10 +442,26 @@ func (m *CanvasMixer) mixerLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
+		// If active source is NDI and distributor is running, listen to incoming frames directly
+		var ndiNotify <-chan struct{}
+		m.mu.RLock()
+		if m.ndiDist != nil && (m.activeSource == "ndi" || m.nextSource == "ndi") {
+			ndiNotify = m.ndiDist.FrameNotifier()
+		}
+		m.mu.RUnlock()
+
 		select {
 		case <-ctx.Done():
 			return
+		case <-ndiNotify:
+			// Frame arrived from NDI: render and broadcast immediately without waiting for ticker!
+			f := m.getFrame()
+			m.renderFrame(f.data)
+			m.broadcastFrame(f)
+			// Reset ticker to maintain proper timing fallback without double-pulsing
+			ticker.Reset(interval)
 		case <-ticker.C:
+			// Fallback or generator mode (test pattern, video, logo)
 			f := m.getFrame()
 			m.renderFrame(f.data)
 			m.broadcastFrame(f)

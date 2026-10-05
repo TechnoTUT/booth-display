@@ -64,6 +64,7 @@ type NDIDistributor struct {
 
 	subscribers map[io.WriteCloser]bool
 	subMu       sync.Mutex
+	frameNotify chan struct{}
 }
 
 func NewNDIDistributor(sourceName string, canvas config.CanvasConfig) *NDIDistributor {
@@ -83,7 +84,13 @@ func NewNDIDistributor(sourceName string, canvas config.CanvasConfig) *NDIDistri
 		frontBuf:    make([]byte, frameBytes),
 		backBuf:     make([]byte, frameBytes),
 		subscribers: make(map[io.WriteCloser]bool),
+		frameNotify: make(chan struct{}, 1),
 	}
+}
+
+// FrameNotifier returns a channel that signals whenever a new frame arrives from NDI.
+func (d *NDIDistributor) FrameNotifier() <-chan struct{} {
+	return d.frameNotify
 }
 
 // expandPipeBuffer attempts to expand the OS pipe buffer capacity on Linux to reduce context switching.
@@ -201,6 +208,12 @@ func (d *NDIDistributor) readLoop(ctx context.Context, r io.Reader) {
 			d.frontBuf, d.backBuf = d.backBuf, d.frontBuf
 			d.hasFrame = true
 			d.bufMu.Unlock()
+
+			// Notify listener immediately (zero-wait event-driven)
+			select {
+			case d.frameNotify <- struct{}{}:
+			default:
+			}
 
 			// Broadcast frame to external pipe subscribers if any
 			d.subMu.Lock()
