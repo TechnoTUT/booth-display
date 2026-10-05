@@ -28,6 +28,10 @@ class UdpStreamReceiver(
     var packetCount: Long = 0L
         private set
 
+    @Volatile
+    var lastError: String? = null
+        private set
+
     private val assembler = FrameAssembler { frame, isKeyframe, timestamp ->
         onFrameReceived(frame, isKeyframe, timestamp)
     }
@@ -41,16 +45,34 @@ class UdpStreamReceiver(
             val packet = DatagramPacket(receiveBuffer, receiveBuffer.size)
 
             try {
-                val sock = DatagramSocket(null).apply {
-                    reuseAddress = true
-                    // 2MB socket receive buffer for burst protection
-                    receiveBufferSize = 2 * 1024 * 1024
-                    bind(InetSocketAddress(port))
+                // Explicitly bind to IPv4 wildcard 0.0.0.0 to prevent IPv6 wildcard dual-stack issues
+                val sock = try {
+                    DatagramSocket(null).apply {
+                        reuseAddress = true
+                        bind(InetSocketAddress("0.0.0.0", port))
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed binding to 0.0.0.0:$port, fallback to standard bind: ${e.message}")
+                    DatagramSocket(port).apply {
+                        reuseAddress = true
+                    }
                 }
+
+                // Set 2MB receive buffer after bind (prevent SocketException on some Android OS)
+                try {
+                    sock.receiveBufferSize = 2 * 1024 * 1024
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not set receiveBufferSize: ${e.message}")
+                }
+
                 socket = sock
+                lastError = null
 
                 while (isRunning.get()) {
                     try {
+                        // Crucial: reset buffer length before every receive, otherwise JVM truncates future packets
+                        packet.length = receiveBuffer.size
+
                         sock.receive(packet)
                         packetCount++
                         val length = packet.length
@@ -71,6 +93,7 @@ class UdpStreamReceiver(
                     }
                 }
             } catch (e: Exception) {
+                lastError = "Socket err: ${e.message}"
                 Log.e(TAG, "Fatal socket initialization error: ${e.message}", e)
             } finally {
                 socket?.close()

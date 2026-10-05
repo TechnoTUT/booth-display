@@ -35,7 +35,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         textStatus.text = "UDP :$listenPort"
         textMetrics.text = "Waiting for stream..."
         textMetrics.setTextColor(android.graphics.Color.parseColor("#94A3B8"))
-        textDiagnostics.text = "Rx: ${receiver?.packetCount ?: 0} pkts | Check config.yaml IP"
+        val err = receiver?.lastError
+        if (err != null) {
+            textDiagnostics.text = err
+            textDiagnostics.setTextColor(android.graphics.Color.parseColor("#EF4444"))
+        } else {
+            textDiagnostics.text = "Rx: ${receiver?.packetCount ?: 0} pkts | Waiting..."
+            textDiagnostics.setTextColor(android.graphics.Color.parseColor("#64748B"))
+        }
         osdOverlay.visibility = View.VISIBLE
     }
 
