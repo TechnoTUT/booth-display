@@ -24,6 +24,10 @@ class UdpStreamReceiver(
     private var socket: DatagramSocket? = null
     private var workerThread: Thread? = null
 
+    @Volatile
+    var packetCount: Long = 0L
+        private set
+
     private val assembler = FrameAssembler { frame, isKeyframe, timestamp ->
         onFrameReceived(frame, isKeyframe, timestamp)
     }
@@ -48,6 +52,7 @@ class UdpStreamReceiver(
                 while (isRunning.get()) {
                     try {
                         sock.receive(packet)
+                        packetCount++
                         val length = packet.length
                         if (length > PacketHeader.HEADER_SIZE) {
                             val header = PacketHeader.parse(receiveBuffer, 0, length)

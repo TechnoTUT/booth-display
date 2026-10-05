@@ -18,12 +18,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var osdOverlay: View
     private lateinit var textStatus: TextView
     private lateinit var textMetrics: TextView
+    private lateinit var textDiagnostics: TextView
 
     private val decoder = HardwareH264Decoder(width = 1920, height = 540)
     private var receiver: UdpStreamReceiver? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var frameCount = 0
+    private var totalFrames = 0L
     private var lastFpsCalculationTime = System.currentTimeMillis()
     private var isStreamingActive = false
 
@@ -33,6 +35,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         textStatus.text = "UDP :$listenPort"
         textMetrics.text = "Waiting for stream..."
         textMetrics.setTextColor(android.graphics.Color.parseColor("#94A3B8"))
+        textDiagnostics.text = "Rx: ${receiver?.packetCount ?: 0} pkts | Check config.yaml IP"
         osdOverlay.visibility = View.VISIBLE
     }
 
@@ -50,6 +53,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         osdOverlay = findViewById(R.id.osdOverlay)
         textStatus = findViewById(R.id.textStatus)
         textMetrics = findViewById(R.id.textMetrics)
+        textDiagnostics = findViewById(R.id.textDiagnostics)
 
         // Parse optional intent extras: e.g. adb shell am start --ei port 8555 --es display_id DISPLAY-2
         parseIntentExtras(intent)
@@ -156,10 +160,18 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 mainHandler.removeCallbacks(streamTimeoutRunnable)
                 mainHandler.postDelayed(streamTimeoutRunnable, 5000)
 
-                // First frame arrived: hide OSD automatically
+                totalFrames++
+                val rxPkts = receiver?.packetCount ?: 0L
+
+                // First frame arrived: keep OSD visible for 4s so user can verify status, then hide
                 if (!isStreamingActive) {
                     isStreamingActive = true
-                    osdOverlay.visibility = View.GONE
+                    textDiagnostics.text = "Rx: $rxPkts pkts | Dec: $totalFrames f"
+                    mainHandler.postDelayed({
+                        if (isStreamingActive) {
+                            osdOverlay.visibility = View.GONE
+                        }
+                    }, 4000)
                 }
 
                 if (now - lastFpsCalculationTime >= 1000) {
@@ -170,6 +182,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                     textStatus.text = "UDP :$listenPort"
                     textMetrics.text = String.format("%.1f FPS", fps)
                     textMetrics.setTextColor(android.graphics.Color.parseColor("#10B981"))
+                    textDiagnostics.text = "Rx: $rxPkts pkts | Dec: $totalFrames f"
                 }
             }
         }.apply {

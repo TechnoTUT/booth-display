@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:background="#000000">
+    android:layout_height="match_parent">
 
     <!-- Direct Hardware Surface for Video Rendering -->
     <SurfaceView
@@ -103,6 +102,17 @@
                 android:textSize="11sp"
                 android:textStyle="bold" />
         </LinearLayout>
+
+        <!-- Diagnostics Row -->
+        <TextView
+            android:id="@+id/textDiagnostics"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:fontFamily="monospace"
+            android:text="Rx: 0 pkts | Dec: 0 f | Check config.yaml IP"
+            android:textColor="#64748B"
+            android:textSize="10sp" />
     </LinearLayout>
 
 </FrameLayout>
