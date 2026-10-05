@@ -97,6 +97,12 @@ func (d *NDIDistributor) Start() error {
 		return fmt.Errorf("failed to create NDI bridge stdout pipe: %w", err)
 	}
 
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return fmt.Errorf("failed to create NDI bridge stderr pipe: %w", err)
+	}
+
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return fmt.Errorf("failed to start NDI bridge: %w", err)
@@ -104,7 +110,15 @@ func (d *NDIDistributor) Start() error {
 
 	d.cmd = cmd
 	d.running = true
-	d.wg.Add(1)
+	d.wg.Add(2)
+
+	go func() {
+		defer d.wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			log.Printf("[ndi_bridge] %s", scanner.Text())
+		}
+	}()
 
 	go d.readLoop(ctx, stdout)
 

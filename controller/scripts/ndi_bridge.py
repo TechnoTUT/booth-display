@@ -143,7 +143,7 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
-    while running and receiver.is_connected():
+    while running:
         now = time.time()
         elapsed = now - last_frame_time
         if elapsed < frame_interval:
@@ -169,6 +169,7 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
                 stdout.flush()
                 last_frame_time = time.time()
             else:
+                # Waiting for frame from NDI source
                 time.sleep(0.005)
         except (BrokenPipeError, IOError):
             break
