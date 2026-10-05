@@ -33,6 +33,18 @@ class HardwareH264Decoder(
     private var isConfigured = false
     private val bufferInfo = MediaCodec.BufferInfo()
 
+    @Volatile
+    var renderedFrameCount: Long = 0L
+        private set
+
+    @Volatile
+    var lastError: String? = null
+        private set
+
+    @Volatile
+    var lastNalType: String = "None"
+        private set
+
     // Parameter sets cached for Access Unit reassembly and decoder initialization
     private var spsBuffer: ByteArray? = null
     private var ppsBuffer: ByteArray? = null
@@ -63,14 +75,23 @@ class HardwareH264Decoder(
                 }
 
                 val decoder = MediaCodec.createDecoderByType(MIME_TYPE)
-                decoder.configure(format, surface, null, 0)
+                try {
+                    decoder.configure(format, surface, null, 0)
+                } catch (e: Exception) {
+                    // Height 540 is not a multiple of 16 (16 * 34 = 544). Some OMX decoders require 16-aligned height.
+                    Log.w(TAG, "Configure with ${width}x${height} failed (${e.message}), trying 16-aligned height 544...")
+                    val alignedFormat = MediaFormat.createVideoFormat(MIME_TYPE, width, 544)
+                    decoder.configure(alignedFormat, surface, null, 0)
+                }
                 decoder.start()
 
                 codec = decoder
                 isConfigured = true
                 hasReceivedKeyframe = false
+                lastError = null
                 Log.i(TAG, "Hardware H.264 decoder successfully started ($width x $height)")
             } catch (e: Exception) {
+                lastError = "Codec init fail: ${e.message}"
                 Log.e(TAG, "Failed to start MediaCodec: ${e.message}", e)
                 stop()
             }
@@ -104,6 +125,7 @@ class HardwareH264Decoder(
 
             when (nalType) {
                 NAL_TYPE_SPS -> {
+                    lastNalType = "SPS (${data.size}B)"
                     spsBuffer = data.copyOf()
                     // Queue codec-specific configuration data to MediaCodec
                     queueInput(decoder, data, presentationTimeUs, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
@@ -112,6 +134,7 @@ class HardwareH264Decoder(
                 }
 
                 NAL_TYPE_PPS -> {
+                    lastNalType = "PPS (${data.size}B)"
                     ppsBuffer = data.copyOf()
                     // Queue codec-specific configuration data to MediaCodec
                     queueInput(decoder, data, presentationTimeUs, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
@@ -120,11 +143,13 @@ class HardwareH264Decoder(
                 }
 
                 NAL_TYPE_SEI -> {
+                    lastNalType = "SEI (${data.size}B)"
                     // SEI contains non-picture metadata; do not feed as video frame
                     return
                 }
 
                 NAL_TYPE_IDR -> {
+                    lastNalType = "IDR (${data.size}B)"
                     // IDR Keyframe: prepend SPS/PPS if available to ensure full Access Unit
                     val sps = spsBuffer
                     val pps = ppsBuffer
@@ -139,11 +164,12 @@ class HardwareH264Decoder(
                     }
                     hasReceivedKeyframe = true
                     queueInput(decoder, payload, presentationTimeUs, MediaCodec.BUFFER_FLAG_KEY_FRAME)
-                    drainOutput(decoder, timeoutUs = 2000L)
+                    drainOutput(decoder, timeoutUs = 5000L)
                     return
                 }
 
                 NAL_TYPE_NON_IDR -> {
+                    lastNalType = "P (${data.size}B)"
                     // Drop P-frames until the first keyframe is decoded to prevent corrupt artifacts
                     if (!hasReceivedKeyframe) return
                     queueInput(decoder, data, presentationTimeUs, 0)
@@ -152,7 +178,7 @@ class HardwareH264Decoder(
                 }
 
                 else -> {
-                    // Fallback for non-standard / multi-NAL buffers
+                    lastNalType = "Unknown (${data.size}B)"
                     val flags = if (isKeyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                     if (isKeyframe) {
                         hasReceivedKeyframe = true
@@ -175,9 +201,11 @@ class HardwareH264Decoder(
                 inputBuffer?.put(data)
                 decoder.queueInputBuffer(inIndex, 0, data.size, presentationTimeUs, flags)
             } else {
+                lastError = "Input buf full"
                 Log.w(TAG, "Input buffer full, dropping frame")
             }
         } catch (e: Exception) {
+            lastError = "Queue err: ${e.message}"
             Log.w(TAG, "Queue input error: ${e.message}")
         }
     }
@@ -189,7 +217,12 @@ class HardwareH264Decoder(
                 when {
                     outIndex >= 0 -> {
                         // Direct hardware render to SurfaceView
-                        decoder.releaseOutputBuffer(outIndex, true)
+                        try {
+                            decoder.releaseOutputBuffer(outIndex, true)
+                            renderedFrameCount++
+                        } catch (e: Exception) {
+                            lastError = "Render err: ${e.message}"
+                        }
                     }
                     outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         Log.i(TAG, "Output format changed: ${decoder.outputFormat}")
@@ -206,6 +239,7 @@ class HardwareH264Decoder(
                 }
             }
         } catch (e: Exception) {
+            lastError = "Drain err: ${e.message}"
             Log.w(TAG, "Drain output error: ${e.message}")
         }
     }

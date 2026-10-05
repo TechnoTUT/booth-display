@@ -57,6 +57,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         setContentView(R.layout.activity_main)
 
         surfaceView = findViewById(R.id.surfaceView)
+        surfaceView.setZOrderMediaOverlay(true)
+        surfaceView.holder.setFormat(android.graphics.PixelFormat.OPAQUE)
+
         osdOverlay = findViewById(R.id.osdOverlay)
         textStatus = findViewById(R.id.textStatus)
         textMetrics = findViewById(R.id.textMetrics)
@@ -169,16 +172,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
                 totalFrames++
                 val rxPkts = receiver?.packetCount ?: 0L
+                val rendered = decoder.renderedFrameCount
+                val err = decoder.lastError ?: receiver?.lastError
 
-                // First frame arrived: keep OSD visible for 4s so user can verify status, then hide
                 if (!isStreamingActive) {
                     isStreamingActive = true
-                    textDiagnostics.text = "Rx: $rxPkts pkts | Dec: $totalFrames f"
-                    mainHandler.postDelayed({
-                        if (isStreamingActive) {
-                            osdOverlay.visibility = View.GONE
-                        }
-                    }, 4000)
                 }
 
                 if (now - lastFpsCalculationTime >= 1000) {
@@ -187,9 +185,22 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                     lastFpsCalculationTime = now
 
                     textStatus.text = "UDP :$listenPort"
-                    textMetrics.text = String.format("%.1f FPS", fps)
-                    textMetrics.setTextColor(android.graphics.Color.parseColor("#10B981"))
-                    textDiagnostics.text = "Rx: $rxPkts pkts | Dec: $totalFrames f"
+                    if (err != null) {
+                        textMetrics.text = "Decoder Error"
+                        textMetrics.setTextColor(android.graphics.Color.parseColor("#EF4444"))
+                        textDiagnostics.text = "$err | NAL: ${decoder.lastNalType} | Rx: $rxPkts"
+                        textDiagnostics.setTextColor(android.graphics.Color.parseColor("#EF4444"))
+                    } else if (rendered > 0) {
+                        textMetrics.text = String.format("%.1f FPS (Rend: %d)", fps, rendered)
+                        textMetrics.setTextColor(android.graphics.Color.parseColor("#10B981"))
+                        textDiagnostics.text = "Rx: $rxPkts pkts | NAL: ${decoder.lastNalType} | Rend: $rendered"
+                        textDiagnostics.setTextColor(android.graphics.Color.parseColor("#10B981"))
+                    } else {
+                        textMetrics.text = String.format("%.1f FPS (Waiting IDR)", fps)
+                        textMetrics.setTextColor(android.graphics.Color.parseColor("#F59E0B"))
+                        textDiagnostics.text = "Rx: $rxPkts pkts | NAL: ${decoder.lastNalType} | Rend: 0"
+                        textDiagnostics.setTextColor(android.graphics.Color.parseColor("#F59E0B"))
+                    }
                 }
             }
         }.apply {
