@@ -3,6 +3,7 @@ package com.technotut.boothdisplay.decoder
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
+import android.os.Process
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -110,15 +111,20 @@ class HardwareH264Decoder(
     private fun startDrainThread(decoder: MediaCodec) {
         val bufferInfo = MediaCodec.BufferInfo()
         drainThread = Thread({
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set URGENT_DISPLAY priority: ${e.message}")
+            }
             Log.i(TAG, "MediaCodec drain thread started")
             while (isConfigured) {
                 try {
-                    val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 10000L)
+                    val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 2000L)
                     when {
                         outIndex >= 0 -> {
-                            // Render frame directly to SurfaceView
+                            // Render frame directly and immediately to SurfaceView with present timestamp
                             try {
-                                decoder.releaseOutputBuffer(outIndex, true)
+                                decoder.releaseOutputBuffer(outIndex, System.nanoTime())
                                 renderedFrameCount++
                             } catch (e: Exception) {
                                 if (isConfigured) lastError = "Release err: ${e.message}"

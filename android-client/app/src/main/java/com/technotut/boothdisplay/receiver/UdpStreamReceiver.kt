@@ -1,5 +1,6 @@
 package com.technotut.boothdisplay.receiver
 
+import android.os.Process
 import android.util.Log
 import com.technotut.boothdisplay.protocol.FrameAssembler
 import com.technotut.boothdisplay.protocol.PacketHeader
@@ -40,6 +41,11 @@ class UdpStreamReceiver(
         if (isRunning.getAndSet(true)) return
 
         workerThread = Thread({
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to set URGENT_AUDIO priority: ${e.message}")
+            }
             Log.i(TAG, "Starting UDP Stream Receiver on port $port...")
             val receiveBuffer = ByteArray(BUFFER_SIZE)
             val packet = DatagramPacket(receiveBuffer, receiveBuffer.size)
