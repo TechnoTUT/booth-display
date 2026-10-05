@@ -51,6 +51,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         textStatus = findViewById(R.id.textStatus)
         textMetrics = findViewById(R.id.textMetrics)
 
+        // Parse optional intent extras: e.g. adb shell am start --ei port 8555 --es display_id DISPLAY-2
+        parseIntentExtras(intent)
+
         surfaceView.holder.addCallback(this)
 
         // Hide navigation/status bar
@@ -78,6 +81,30 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     override fun onResume() {
         super.onResume()
         applyImmersiveMode()
+    }
+
+    override fun onNewIntent(intent: android.content.Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val oldPort = listenPort
+        parseIntentExtras(intent)
+        if (oldPort != listenPort) {
+            startReceiver()
+        }
+    }
+
+    private fun parseIntentExtras(intent: android.content.Intent?) {
+        if (intent == null) return
+        val portExtra = intent.getIntExtra("port", -1)
+        if (portExtra in 1..65535) {
+            listenPort = portExtra
+        }
+        val displayExtra = intent.getStringExtra("display_id")
+        if (!displayExtra.isNullOrEmpty()) {
+            val badge: TextView? = findViewById(R.id.textBadge)
+            badge?.text = displayExtra.uppercase()
+        }
+        textStatus.text = "UDP :$listenPort"
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
