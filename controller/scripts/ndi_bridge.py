@@ -154,20 +154,11 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
+    last_frame_id: tuple[float, float] | None = None
+    last_output_time = 0.0
+    max_idle_sec = 0.05  # Keep-alive frame interval (20fps minimum fallback)
+
     while running:
-        # High-precision drift-free pacing
-        now = time.perf_counter()
-        sleep_dur = next_frame_time - now
-        if sleep_dur > 0.001:
-            time.sleep(sleep_dur - 0.0005)
-        while time.perf_counter() < next_frame_time:
-            pass
-
-        next_frame_time += frame_interval
-        # Avoid falling behind if processing is delayed
-        if next_frame_time < time.perf_counter() - frame_interval:
-            next_frame_time = time.perf_counter() + frame_interval
-
         try:
             # Drain and drop all pending audio samples immediately to keep NDI internal latency at zero
             if receiver.frame_sync.audio_samples_available() > 0:
@@ -178,34 +169,45 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
             data_size = vf.get_data_size()
 
             if w > 0 and h > 0 and data_size > 0:
-                arr = None
-                try:
-                    # Zero-copy view into frame memory buffer
-                    arr = np.asarray(vf).reshape((h, w, 4))
+                frame_id = (vf.get_timecode_posix(), vf.get_timestamp_posix())
+                now = time.perf_counter()
 
-                    if w == width and h == height:
-                        np.copyto(out_buf, arr)
-                    else:
-                        if cached_res != (w, h):
-                            cached_res = (w, h)
-                            crop_rect = calc_crop_rect(w, h, width, height, crop_mode=crop_mode)
+                # Process immediately when a new NDI frame arrives (or on fallback keep-alive)
+                if frame_id != last_frame_id or (now - last_output_time >= max_idle_sec):
+                    last_frame_id = frame_id
+                    last_output_time = now
 
-                        cx, cy, cw, ch = crop_rect
-                        cv2.resize(arr[cy : cy + ch, cx : cx + cw], (width, height), dst=out_buf, interpolation=cv2.INTER_LINEAR)
-                finally:
-                    # Release view buffer immediately so next capture_video doesn't fail with 'cannot write with view active'
                     arr = None
+                    try:
+                        # Zero-copy view into frame memory buffer
+                        arr = np.asarray(vf).reshape((h, w, 4))
 
-                stdout.write(out_view)
-                stdout.flush()
+                        if w == width and h == height:
+                            np.copyto(out_buf, arr)
+                        else:
+                            if cached_res != (w, h):
+                                cached_res = (w, h)
+                                crop_rect = calc_crop_rect(w, h, width, height, crop_mode=crop_mode)
+
+                            cx, cy, cw, ch = crop_rect
+                            cv2.resize(arr[cy : cy + ch, cx : cx + cw], (width, height), dst=out_buf, interpolation=cv2.INTER_LINEAR)
+                    finally:
+                        # Release view buffer immediately so next capture_video doesn't fail with 'cannot write with view active'
+                        arr = None
+
+                    stdout.write(out_view)
+                    stdout.flush()
+                else:
+                    # New frame not yet arrived from NDI; sleep sub-millisecond to avoid high CPU while polling
+                    time.sleep(0.0005)
             else:
                 # Waiting for frame from NDI source
-                time.sleep(0.002)
+                time.sleep(0.001)
         except (BrokenPipeError, IOError):
             break
         except Exception as e:
             sys.stderr.write(f"[ndi_bridge] Capture error: {e}\n")
-            time.sleep(0.01)
+            time.sleep(0.005)
 
 
 def main():

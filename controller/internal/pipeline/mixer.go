@@ -100,9 +100,10 @@ type CanvasMixer struct {
 	transStartTime time.Time
 	inTransition   bool
 
-	running  bool
-	cancelFn context.CancelFunc
-	wg       sync.WaitGroup
+	running   bool
+	cancelFn  context.CancelFunc
+	wg        sync.WaitGroup
+	triggerCh chan struct{}
 }
 
 func NewCanvasMixer(canvas config.CanvasConfig, displays []config.DisplayConfig) *CanvasMixer {
@@ -136,6 +137,7 @@ func NewCanvasMixer(canvas config.CanvasConfig, displays []config.DisplayConfig)
 		activeSource: "testpattern",
 		transition:   TransitionCut,
 		duration:     500 * time.Millisecond,
+		triggerCh:    make(chan struct{}, 1),
 	}
 
 	mixer.framePool.New = func() any {
@@ -310,6 +312,12 @@ func (m *CanvasMixer) startNDILocked(sourceName string) error {
 	m.stopExternalSourcesLocked()
 
 	dist := NewNDIDistributor(sourceName, m.canvas)
+	dist.SetOnFrameReady(func() {
+		select {
+		case m.triggerCh <- struct{}{}:
+		default:
+		}
+	})
 	if err := dist.Start(); err != nil {
 		return fmt.Errorf("failed to start NDI: %w", err)
 	}
@@ -445,12 +453,31 @@ func (m *CanvasMixer) mixerLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-m.triggerCh:
+			// Low-latency event-driven push: Render and broadcast immediately upon NDI frame arrival
 			f := m.getFrame()
 			m.renderFrame(f.data)
 			m.broadcastFrame(f)
+		case <-ticker.C:
+			// Regular pacing for non-NDI sources (testpattern, logo, video, rainbow)
+			// or fallback keep-alive if NDI stream pauses
+			m.mu.RLock()
+			isNDI := (m.activeSource == "ndi" || (m.inTransition && m.nextSource == "ndi"))
+			m.mu.RUnlock()
+			if !isNDI {
+				f := m.getFrame()
+				m.renderFrame(f.data)
+				m.broadcastFrame(f)
+			}
 		}
 	}
+}
+
+// GetLatestFrame copies the latest rendered canvas frame into dst for asynchronous, decoupled preview sampling.
+func (m *CanvasMixer) GetLatestFrame(dst []byte) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	copy(dst, m.currentFrame)
 }
 
 func (m *CanvasMixer) renderFrame(out []byte) {

@@ -62,8 +62,16 @@ type NDIDistributor struct {
 	hasFrame bool
 	bufMu    sync.RWMutex
 
+	onFrameReady func()
+
 	subscribers map[io.WriteCloser]bool
 	subMu       sync.Mutex
+}
+
+func (d *NDIDistributor) SetOnFrameReady(fn func()) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onFrameReady = fn
 }
 
 func NewNDIDistributor(sourceName string, canvas config.CanvasConfig) *NDIDistributor {
@@ -201,6 +209,13 @@ func (d *NDIDistributor) readLoop(ctx context.Context, r io.Reader) {
 			d.frontBuf, d.backBuf = d.backBuf, d.frontBuf
 			d.hasFrame = true
 			d.bufMu.Unlock()
+
+			d.mu.Lock()
+			fn := d.onFrameReady
+			d.mu.Unlock()
+			if fn != nil {
+				fn()
+			}
 
 			// Broadcast frame to external pipe subscribers if any
 			d.subMu.Lock()
