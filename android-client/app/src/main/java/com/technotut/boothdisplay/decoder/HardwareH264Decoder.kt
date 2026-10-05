@@ -30,8 +30,9 @@ class HardwareH264Decoder(
 
     private val lock = Any()
     private var codec: MediaCodec? = null
+    @Volatile
     private var isConfigured = false
-    private val bufferInfo = MediaCodec.BufferInfo()
+    private var drainThread: Thread? = null
 
     @Volatile
     var renderedFrameCount: Long = 0L
@@ -45,7 +46,7 @@ class HardwareH264Decoder(
     var lastNalType: String = "None"
         private set
 
-    // Parameter sets cached for Access Unit reassembly and decoder initialization
+    // Parameter sets cached for Access Unit reassembly
     private var spsBuffer: ByteArray? = null
     private var ppsBuffer: ByteArray? = null
     private var hasReceivedKeyframe = false
@@ -55,22 +56,23 @@ class HardwareH264Decoder(
             stop()
 
             try {
-                val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height)
+                val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
+                    // Crucial: Allocate sufficient input buffer to prevent BufferOverflowException
+                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1024 * 1024)
 
-                // Only set KEY_LOW_LATENCY on Android 11+ (API 30+)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    try {
-                        format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "KEY_LOW_LATENCY not supported: ${e.message}")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        try {
+                            setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "KEY_LOW_LATENCY not supported: ${e.message}")
+                        }
                     }
-                }
-                // Only set KEY_PRIORITY on Android 6.0+ (API 23+)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    try {
-                        format.setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority
-                    } catch (e: Exception) {
-                        Log.w(TAG, "KEY_PRIORITY not supported: ${e.message}")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        try {
+                            setInteger(MediaFormat.KEY_PRIORITY, 0)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "KEY_PRIORITY not supported: ${e.message}")
+                        }
                     }
                 }
 
@@ -78,9 +80,11 @@ class HardwareH264Decoder(
                 try {
                     decoder.configure(format, surface, null, 0)
                 } catch (e: Exception) {
-                    // Height 540 is not a multiple of 16 (16 * 34 = 544). Some OMX decoders require 16-aligned height.
+                    // Height 540 is not a multiple of 16 (16 * 34 = 544). Try 16-aligned fallback.
                     Log.w(TAG, "Configure with ${width}x${height} failed (${e.message}), trying 16-aligned height 544...")
-                    val alignedFormat = MediaFormat.createVideoFormat(MIME_TYPE, width, 544)
+                    val alignedFormat = MediaFormat.createVideoFormat(MIME_TYPE, width, 544).apply {
+                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1024 * 1024)
+                    }
                     decoder.configure(alignedFormat, surface, null, 0)
                 }
                 decoder.start()
@@ -88,13 +92,58 @@ class HardwareH264Decoder(
                 codec = decoder
                 isConfigured = true
                 hasReceivedKeyframe = false
+                renderedFrameCount = 0L
                 lastError = null
+
+                // Start dedicated background output drain thread for immediate zero-latency rendering
+                startDrainThread(decoder)
+
                 Log.i(TAG, "Hardware H.264 decoder successfully started ($width x $height)")
             } catch (e: Exception) {
                 lastError = "Codec init fail: ${e.message}"
                 Log.e(TAG, "Failed to start MediaCodec: ${e.message}", e)
                 stop()
             }
+        }
+    }
+
+    private fun startDrainThread(decoder: MediaCodec) {
+        val bufferInfo = MediaCodec.BufferInfo()
+        drainThread = Thread({
+            Log.i(TAG, "MediaCodec drain thread started")
+            while (isConfigured) {
+                try {
+                    val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 10000L)
+                    when {
+                        outIndex >= 0 -> {
+                            // Render frame directly to SurfaceView
+                            try {
+                                decoder.releaseOutputBuffer(outIndex, true)
+                                renderedFrameCount++
+                            } catch (e: Exception) {
+                                if (isConfigured) lastError = "Release err: ${e.message}"
+                            }
+                        }
+                        outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                            Log.i(TAG, "MediaCodec output format changed: ${decoder.outputFormat}")
+                        }
+                        outIndex == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> {
+                            Log.i(TAG, "MediaCodec output buffers changed")
+                        }
+                        outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                            // Timeout, continue polling
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (!isConfigured) break
+                    lastError = "Drain err: ${e.message}"
+                    Log.w(TAG, "Drain output loop error: ${e.message}")
+                }
+            }
+            Log.i(TAG, "MediaCodec drain thread stopped")
+        }, "MediaCodecDrainThread").apply {
+            priority = Thread.MAX_PRIORITY
+            start()
         }
     }
 
@@ -116,41 +165,34 @@ class HardwareH264Decoder(
         return -1
     }
 
-    fun decodeFrame(data: ByteArray, isKeyframe: Boolean, presentationTimeUs: Long) {
+    fun decodeFrame(data: ByteArray, isKeyframe: Boolean, timestampMs: Long) {
         synchronized(lock) {
             val decoder = codec ?: return
             if (!isConfigured) return
 
             val nalType = findNalType(data)
+            val ptsUs = System.nanoTime() / 1000L // Strictly monotonic presentation timestamp
 
             when (nalType) {
                 NAL_TYPE_SPS -> {
                     lastNalType = "SPS (${data.size}B)"
                     spsBuffer = data.copyOf()
-                    // Queue codec-specific configuration data to MediaCodec
-                    queueInput(decoder, data, presentationTimeUs, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
-                    drainOutput(decoder, timeoutUs = 0)
                     return
                 }
 
                 NAL_TYPE_PPS -> {
                     lastNalType = "PPS (${data.size}B)"
                     ppsBuffer = data.copyOf()
-                    // Queue codec-specific configuration data to MediaCodec
-                    queueInput(decoder, data, presentationTimeUs, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
-                    drainOutput(decoder, timeoutUs = 0)
                     return
                 }
 
                 NAL_TYPE_SEI -> {
                     lastNalType = "SEI (${data.size}B)"
-                    // SEI contains non-picture metadata; do not feed as video frame
                     return
                 }
 
                 NAL_TYPE_IDR -> {
                     lastNalType = "IDR (${data.size}B)"
-                    // IDR Keyframe: prepend SPS/PPS if available to ensure full Access Unit
                     val sps = spsBuffer
                     val pps = ppsBuffer
                     val payload = if (sps != null && pps != null) {
@@ -163,30 +205,26 @@ class HardwareH264Decoder(
                         data
                     }
                     hasReceivedKeyframe = true
-                    queueInput(decoder, payload, presentationTimeUs, MediaCodec.BUFFER_FLAG_KEY_FRAME)
-                    drainOutput(decoder, timeoutUs = 5000L)
+                    queueInput(decoder, payload, ptsUs, MediaCodec.BUFFER_FLAG_KEY_FRAME)
                     return
                 }
 
                 NAL_TYPE_NON_IDR -> {
                     lastNalType = "P (${data.size}B)"
-                    // Drop P-frames until the first keyframe is decoded to prevent corrupt artifacts
                     if (!hasReceivedKeyframe) return
-                    queueInput(decoder, data, presentationTimeUs, 0)
-                    drainOutput(decoder, timeoutUs = 2000L)
+                    queueInput(decoder, data, ptsUs, 0)
                     return
                 }
 
                 else -> {
-                    lastNalType = "Unknown (${data.size}B)"
+                    lastNalType = "Other (${data.size}B)"
                     val flags = if (isKeyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                     if (isKeyframe) {
                         hasReceivedKeyframe = true
                     } else if (!hasReceivedKeyframe) {
                         return
                     }
-                    queueInput(decoder, data, presentationTimeUs, flags)
-                    drainOutput(decoder, timeoutUs = 2000L)
+                    queueInput(decoder, data, ptsUs, flags)
                 }
             }
         }
@@ -198,6 +236,11 @@ class HardwareH264Decoder(
             if (inIndex >= 0) {
                 val inputBuffer: ByteBuffer? = decoder.getInputBuffer(inIndex)
                 inputBuffer?.clear()
+                if (inputBuffer != null && data.size > inputBuffer.capacity()) {
+                    lastError = "Frame too big: ${data.size} > ${inputBuffer.capacity()}"
+                    Log.e(TAG, lastError!!)
+                    return
+                }
                 inputBuffer?.put(data)
                 decoder.queueInputBuffer(inIndex, 0, data.size, presentationTimeUs, flags)
             } else {
@@ -210,46 +253,16 @@ class HardwareH264Decoder(
         }
     }
 
-    private fun drainOutput(decoder: MediaCodec, timeoutUs: Long) {
-        try {
-            while (true) {
-                val outIndex = decoder.dequeueOutputBuffer(bufferInfo, timeoutUs)
-                when {
-                    outIndex >= 0 -> {
-                        // Direct hardware render to SurfaceView
-                        try {
-                            decoder.releaseOutputBuffer(outIndex, true)
-                            renderedFrameCount++
-                        } catch (e: Exception) {
-                            lastError = "Render err: ${e.message}"
-                        }
-                    }
-                    outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        Log.i(TAG, "Output format changed: ${decoder.outputFormat}")
-                    }
-                    outIndex == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> {
-                        Log.i(TAG, "Output buffers changed")
-                    }
-                    outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                        return
-                    }
-                    else -> {
-                        return
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            lastError = "Drain err: ${e.message}"
-            Log.w(TAG, "Drain output error: ${e.message}")
-        }
-    }
-
     fun stop() {
         synchronized(lock) {
             isConfigured = false
             hasReceivedKeyframe = false
             spsBuffer = null
             ppsBuffer = null
+
+            drainThread?.interrupt()
+            drainThread = null
+
             try {
                 codec?.stop()
                 codec?.release()
@@ -261,4 +274,5 @@ class HardwareH264Decoder(
         }
     }
 }
+
 
