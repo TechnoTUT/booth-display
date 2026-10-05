@@ -182,15 +182,13 @@ func (d *NDIDistributor) Unsubscribe(r io.ReadCloser) {
 func (d *NDIDistributor) readLoop(ctx context.Context, r io.Reader) {
 	defer d.wg.Done()
 
-	frameBytes := len(d.backBuf)
-	bufReader := bufio.NewReaderSize(r, frameBytes*2)
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			_, err := io.ReadFull(bufReader, d.backBuf)
+			// Read directly from OS pipe into back buffer without intermediate memory buffering (zero queue delay)
+			_, err := io.ReadFull(r, d.backBuf)
 			if err != nil {
 				if err != io.EOF && ctx.Err() == nil {
 					log.Printf("[NDIDistributor] Read frame error: %v", err)

@@ -23,6 +23,7 @@ try:
     from cyndilib.finder import Finder
     from cyndilib.receiver import Receiver
     from cyndilib.video_frame import VideoFrameSync
+    from cyndilib.audio_frame import AudioFrameSync
     from cyndilib.wrapper.ndi_recv import RecvColorFormat, RecvBandwidth
     import numpy as np
     import cv2
@@ -125,6 +126,13 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
     )
     vf = VideoFrameSync()
     receiver.frame_sync.set_video_frame(vf)
+
+    # Attach AudioFrameSync to immediately drain and drop audio samples.
+    # When audio samples are left unconsumed, NDIlib_framesync's internal queue
+    # overflows ("Unrepairable overflow!"), breaking A/V sync and adding massive latency.
+    af = AudioFrameSync()
+    receiver.frame_sync.set_audio_frame(af)
+
     receiver.set_source(matched)
 
     # Pre-allocate output buffer and 1D memoryview to eliminate per-frame GC allocations
@@ -161,6 +169,10 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
             next_frame_time = time.perf_counter() + frame_interval
 
         try:
+            # Drain and drop all pending audio samples immediately to keep NDI internal latency at zero
+            if receiver.frame_sync.audio_samples_available() > 0:
+                receiver.frame_sync.capture_available_audio()
+
             receiver.frame_sync.capture_video()
             w, h = vf.get_resolution()
             data_size = vf.get_data_size()
