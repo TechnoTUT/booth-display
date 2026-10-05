@@ -17,7 +17,7 @@ type PipelineStatus struct {
 type PipelineEngine struct {
 	cfgPool     *config.Config
 	streamers   *streamer.StreamerPool
-	pipelines   map[string]*DisplayPipeline
+	encoder     *MultiEncoder
 	previewHub  *PreviewBroadcaster
 	previewPipe *PreviewPipeline
 	mixer       *CanvasMixer
@@ -35,7 +35,6 @@ func NewPipelineEngine(cfg *config.Config, streamers *streamer.StreamerPool) *Pi
 	engine := &PipelineEngine{
 		cfgPool:     cfg,
 		streamers:   streamers,
-		pipelines:   make(map[string]*DisplayPipeline),
 		previewHub:  hub,
 		previewPipe: NewPreviewPipeline(hub),
 		mixer:       NewCanvasMixer(snap.Canvas, snap.Displays),
@@ -43,14 +42,22 @@ func NewPipelineEngine(cfg *config.Config, streamers *streamer.StreamerPool) *Pi
 		videoFile:   snap.Media.VideoFile,
 	}
 
-	for _, d := range snap.Displays {
-		sender, ok := streamers.GetSender(d.ID)
-		if ok {
-			engine.pipelines[d.ID] = NewDisplayPipeline(d, sender)
-		}
-	}
+	engine.encoder = engine.newEncoder(snap.Displays)
 
 	return engine
+}
+
+// newEncoder builds a single-process encoder for all displays that have a sender.
+func (e *PipelineEngine) newEncoder(displays []config.DisplayConfig) *MultiEncoder {
+	var ds []config.DisplayConfig
+	var senders []*streamer.DisplaySender
+	for _, d := range displays {
+		if sender, ok := e.streamers.GetSender(d.ID); ok {
+			ds = append(ds, d)
+			senders = append(senders, sender)
+		}
+	}
+	return NewMultiEncoder(ds, senders)
 }
 
 // Start launches streaming for all configured displays through CanvasMixer.
@@ -96,12 +103,9 @@ func (e *PipelineEngine) Start(mode string, mediaTarget string) error {
 
 	_ = e.mixer.SwitchSource(mode, mediaTarget, TransitionCut, 0)
 
-	// Launch DisplayPipelines fed by mixer.Subscribe()
-	for id, pipe := range e.pipelines {
-		inputReader := e.mixer.Subscribe()
-		if err := pipe.Start("raw", "", snap.Canvas, inputReader); err != nil {
-			return fmt.Errorf("failed to start pipeline for %s: %w", id, err)
-		}
+	// Launch the single encoder process fed by mixer.Subscribe()
+	if err := e.encoder.Start(snap.Canvas, e.mixer.Subscribe()); err != nil {
+		return fmt.Errorf("failed to start encoder: %w", err)
 	}
 
 	// Start canvas preview stream fed by mixer
@@ -156,9 +160,7 @@ func (e *PipelineEngine) Stop() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	for _, pipe := range e.pipelines {
-		pipe.Stop()
-	}
+	e.encoder.Stop()
 	e.previewPipe.Stop()
 	if e.mixer != nil {
 		e.mixer.Stop()
@@ -189,24 +191,12 @@ func (e *PipelineEngine) RebuildPipelines(displays []config.DisplayConfig) error
 	defer e.mu.Unlock()
 
 	wasRunning := e.isRunning
-	for _, pipe := range e.pipelines {
-		pipe.Stop()
-	}
-	e.pipelines = make(map[string]*DisplayPipeline)
+	e.encoder.Stop()
+	e.encoder = e.newEncoder(displays)
 
-	snap := e.cfgPool.GetSnapshot()
-	for _, d := range displays {
-		sender, ok := e.streamers.GetSender(d.ID)
-		if ok {
-			pipe := NewDisplayPipeline(d, sender)
-			e.pipelines[d.ID] = pipe
-			if wasRunning && e.mixer != nil {
-				inputReader := e.mixer.Subscribe()
-				if err := pipe.Start("raw", "", snap.Canvas, inputReader); err != nil {
-					return err
-				}
-			}
-		}
+	if wasRunning && e.mixer != nil {
+		snap := e.cfgPool.GetSnapshot()
+		return e.encoder.Start(snap.Canvas, e.mixer.Subscribe())
 	}
 	return nil
 }
