@@ -19,6 +19,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var textStatus: TextView
     private lateinit var textMetrics: TextView
     private lateinit var textDiagnostics: TextView
+    private lateinit var layoutConnectionBadge: View
+    private lateinit var dotStatus: View
+    private lateinit var textConnectionStatus: TextView
 
     private val decoder = HardwareH264Decoder(width = 1920, height = 540)
     private var receiver: UdpStreamReceiver? = null
@@ -32,18 +35,18 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     // 5-second stream timeout runnable to restore OSD standby view
     private val streamTimeoutRunnable = Runnable {
         isStreamingActive = false
+        updateConnectionStatus(false)
         textStatus.text = "UDP :$listenPort"
         textMetrics.text = "Waiting for stream..."
-        textMetrics.setTextColor(android.graphics.Color.parseColor("#94A3B8"))
+        textMetrics.setTextColor(android.graphics.Color.parseColor("#64748B"))
         val err = receiver?.lastError
         if (err != null) {
             textDiagnostics.text = err
             textDiagnostics.setTextColor(android.graphics.Color.parseColor("#EF4444"))
         } else {
-            textDiagnostics.text = "Rx: ${receiver?.packetCount ?: 0} pkts | Waiting..."
+            textDiagnostics.text = "Rx: ${receiver?.packetCount ?: 0} pkts | Ready"
             textDiagnostics.setTextColor(android.graphics.Color.parseColor("#64748B"))
         }
-        osdOverlay.visibility = View.VISIBLE
     }
 
     // Configurable listen port (default: 8554)
@@ -64,8 +67,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         textStatus = findViewById(R.id.textStatus)
         textMetrics = findViewById(R.id.textMetrics)
         textDiagnostics = findViewById(R.id.textDiagnostics)
+        layoutConnectionBadge = findViewById(R.id.layoutConnectionBadge)
+        dotStatus = findViewById(R.id.dotStatus)
+        textConnectionStatus = findViewById(R.id.textConnectionStatus)
 
-        // Parse optional intent extras: e.g. adb shell am start --ei port 8555 --es display_id DISPLAY-2
+        updateConnectionStatus(false)
+
+        // Parse optional intent extras: e.g. adb shell am start --ei port 8555
         parseIntentExtras(intent)
 
         surfaceView.holder.addCallback(this)
@@ -113,12 +121,21 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         if (portExtra in 1..65535) {
             listenPort = portExtra
         }
-        val displayExtra = intent.getStringExtra("display_id")
-        if (!displayExtra.isNullOrEmpty()) {
-            val badge: TextView? = findViewById(R.id.textBadge)
-            badge?.text = displayExtra.uppercase()
-        }
         textStatus.text = "UDP :$listenPort"
+    }
+
+    private fun updateConnectionStatus(isOnline: Boolean) {
+        if (isOnline) {
+            layoutConnectionBadge.setBackgroundResource(R.drawable.bg_badge_online)
+            dotStatus.setBackgroundResource(R.drawable.dot_online)
+            textConnectionStatus.text = "Online"
+            textConnectionStatus.setTextColor(android.graphics.Color.parseColor("#059669"))
+        } else {
+            layoutConnectionBadge.setBackgroundResource(R.drawable.bg_badge_offline)
+            dotStatus.setBackgroundResource(R.drawable.dot_offline)
+            textConnectionStatus.text = "Offline"
+            textConnectionStatus.setTextColor(android.graphics.Color.parseColor("#E11D48"))
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -177,6 +194,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
                 if (!isStreamingActive) {
                     isStreamingActive = true
+                    updateConnectionStatus(true)
                 }
 
                 if (now - lastFpsCalculationTime >= 1000) {
