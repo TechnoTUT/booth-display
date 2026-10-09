@@ -2,12 +2,14 @@ package pipeline
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -26,15 +28,25 @@ type NDISource struct {
 // Run "make setup-python" once to create the virtual environment.
 const ndiBridgeScript = "controller/scripts/ndi_bridge.py"
 
+// ndiDiscoverTimeoutSec is how long the bridge waits for NDI senders to settle.
+// The process context below must be longer than this to cover uv + Python/cyndilib startup.
+const (
+	ndiDiscoverTimeoutSec = 4.0
+	ndiDiscoverCtxTimeout = 15 * time.Second
+)
+
 // DiscoverNDISources runs the Python ndi_bridge via uv to find active NDI senders on the network.
 func DiscoverNDISources() ([]NDISource, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), ndiDiscoverCtxTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "uv", "run", "--project", ".", "python", ndiBridgeScript, "--discover")
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "uv", "run", "--project", ".", "python", ndiBridgeScript,
+		"--discover", "--timeout", fmt.Sprintf("%.1f", ndiDiscoverTimeoutSec))
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to discover NDI sources: %w", err)
+		return nil, fmt.Errorf("failed to discover NDI sources: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
 
 	var sources []NDISource
