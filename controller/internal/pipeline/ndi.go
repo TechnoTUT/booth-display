@@ -64,6 +64,7 @@ type NDIDistributor struct {
 	canvas     config.CanvasConfig
 	cancelFn   context.CancelFunc
 	cmd        *exec.Cmd
+	stdout     io.ReadCloser
 	wg         sync.WaitGroup
 	running    bool
 	mu         sync.Mutex
@@ -136,6 +137,9 @@ func (d *NDIDistributor) Start() error {
 		"--height", fmt.Sprintf("%d", d.canvas.Height),
 		"--fps", fmt.Sprintf("%d", fps),
 	)
+	// "uv run" starts Python as its child. Put both in their own process group so
+	// Stop can kill the Python bridge too, not only uv.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -143,6 +147,7 @@ func (d *NDIDistributor) Start() error {
 		return fmt.Errorf("failed to create NDI bridge stdout pipe: %w", err)
 	}
 	expandPipeBuffer(stdout)
+	d.stdout = stdout
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -256,8 +261,14 @@ func (d *NDIDistributor) Stop() {
 		d.cancelFn()
 	}
 
+	// Kill the whole group (uv and its Python child). Killing uv alone leaves
+	// Python orphaned, and it keeps stdout open, so readLoop would block forever.
 	if d.cmd != nil && d.cmd.Process != nil {
-		_ = d.cmd.Process.Kill()
+		_ = syscall.Kill(-d.cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// Closing the read end unblocks readLoop even if no more frames arrive.
+	if d.stdout != nil {
+		_ = d.stdout.Close()
 	}
 
 	d.subMu.Lock()
