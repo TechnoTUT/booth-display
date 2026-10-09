@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -124,7 +125,37 @@ func (c *Config) Save() error {
 		return fmt.Errorf("no file path configured for config")
 	}
 
-	return os.WriteFile(filePath, data, 0644)
+	return writeFileAtomic(filePath, data, 0644)
+}
+
+// writeFileAtomic writes data to a temporary file in the same directory and renames it
+// over path, so a crash mid-write leaves either the old or the new file, never a partial one.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp config file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename below has succeeded
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to write temp config file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to sync temp config file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp config file: %w", err)
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return fmt.Errorf("failed to set config file mode: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("failed to replace config file: %w", err)
+	}
+	return nil
 }
 
 // UpdateDisplays updates the displays layout safely.

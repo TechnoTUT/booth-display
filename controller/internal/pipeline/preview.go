@@ -156,9 +156,19 @@ func (p *PreviewPipeline) Start(mode string, mediaTarget string, canvas config.C
 
 	p.cmd = cmd
 	p.running = true
-	p.wg.Add(1)
+	p.wg.Add(2)
 
 	go p.readLoop(ctx, stdout)
+
+	// Reap the preview process so it does not linger as a zombie after Stop.
+	// Stop cancels ctx before killing, so only an unexpected exit is logged.
+	go func() {
+		defer p.wg.Done()
+		err := cmd.Wait()
+		if ctx.Err() == nil {
+			log.Printf("[preview] ffmpeg exited unexpectedly: %v", err)
+		}
+	}()
 
 	return nil
 }

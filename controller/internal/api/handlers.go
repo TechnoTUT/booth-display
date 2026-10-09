@@ -118,6 +118,10 @@ func (h *APIHandler) HandleNDISources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Discovery can run for up to 15s, longer than the server-wide WriteTimeout,
+	// so extend the write deadline for this response only.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+
 	sources, err := pipeline.DiscoverNDISources()
 	resp := map[string]interface{}{}
 	if err != nil {

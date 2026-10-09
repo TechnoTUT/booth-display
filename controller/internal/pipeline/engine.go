@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"fmt"
+	"log"
 	"sync"
 
 	"booth-display/controller/internal/config"
@@ -88,13 +89,20 @@ func (e *PipelineEngine) Start(mode string, mediaTarget string) error {
 		return fmt.Errorf("failed to start canvas mixer: %w", err)
 	}
 
+	// fail tears down whatever was started so far, so a failed Start leaves nothing running.
+	fail := func(err error) error {
+		e.mixer.Stop()
+		e.isRunning = false
+		return err
+	}
+
 	// Set initial source
 	if mode == "ndi" {
 		if mediaTarget == "" {
 			mediaTarget = e.ndiSource
 		}
 		if mediaTarget == "" {
-			return fmt.Errorf("no NDI source selected")
+			return fail(fmt.Errorf("no NDI source selected"))
 		}
 		e.ndiSource = mediaTarget
 	} else if mode == "video" {
@@ -104,16 +112,21 @@ func (e *PipelineEngine) Start(mode string, mediaTarget string) error {
 		e.videoFile = mediaTarget
 	}
 
-	_ = e.mixer.SwitchSource(mode, mediaTarget, TransitionCut, 0)
-
-	// Launch the single encoder process fed by mixer.Subscribe()
-	if err := e.encoder.Start(snap.Canvas, e.mixer.Subscribe); err != nil {
-		return fmt.Errorf("failed to start encoder: %w", err)
+	// The source must start, otherwise Play would report success with no picture.
+	if err := e.mixer.SwitchSource(mode, mediaTarget, TransitionCut, 0); err != nil {
+		return fail(err)
 	}
 
-	// Start canvas preview stream fed by mixer
+	// Launch the single encoder process fed by mixer.Subscribe
+	if err := e.encoder.Start(snap.Canvas, e.mixer.Subscribe); err != nil {
+		return fail(fmt.Errorf("failed to start encoder: %w", err))
+	}
+
+	// Start canvas preview stream fed by mixer. A preview failure must not stop the stream.
 	previewReader := e.mixer.Subscribe()
-	_ = e.previewPipe.Start("raw", "", snap.Canvas, previewReader)
+	if err := e.previewPipe.Start("raw", "", snap.Canvas, previewReader); err != nil {
+		log.Printf("[engine] preview unavailable: %v", err)
+	}
 
 	e.isRunning = true
 	e.activeMode = mode
