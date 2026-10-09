@@ -78,12 +78,18 @@ type NDIDistributor struct {
 	subscribers map[io.WriteCloser]bool
 	subMu       sync.Mutex
 	frameNotify chan struct{}
+
+	// exitErr is set when the bridge exits without Stop being called. Guarded by errMu,
+	// not mu, because the exit watcher runs while Stop holds mu and waits for it.
+	exitErr    error
+	lastStderr string
+	errMu      sync.Mutex
 }
 
 func NewNDIDistributor(sourceName string, canvas config.CanvasConfig) *NDIDistributor {
 	w := canvas.Width
 	if w <= 0 {
-		w = 5792
+		w = config.DefaultCanvasWidth
 	}
 	h := canvas.Height
 	if h <= 0 {
@@ -149,32 +155,61 @@ func (d *NDIDistributor) Start() error {
 	expandPipeBuffer(stdout)
 	d.stdout = stdout
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		return fmt.Errorf("failed to create NDI bridge stderr pipe: %w", err)
-	}
+	// Stderr goes through an io.Pipe rather than StderrPipe: cmd.Wait does not close
+	// it early, so the last lines (the reason for an exit) are always read.
+	stderrR, stderrW := io.Pipe()
+	cmd.Stderr = stderrW
 
 	if err := cmd.Start(); err != nil {
 		cancel()
+		_ = stderrW.Close()
 		return fmt.Errorf("failed to start NDI bridge: %w", err)
 	}
 
 	d.cmd = cmd
 	d.running = true
-	d.wg.Add(2)
+	d.wg.Add(3)
 
 	go func() {
 		defer d.wg.Done()
-		scanner := bufio.NewScanner(stderr)
+		scanner := bufio.NewScanner(stderrR)
 		for scanner.Scan() {
-			log.Printf("[ndi_bridge] %s", scanner.Text())
+			line := scanner.Text()
+			log.Printf("[ndi_bridge] %s", line)
+			d.errMu.Lock()
+			d.lastStderr = line
+			d.errMu.Unlock()
 		}
+	}()
+
+	// Reaping the bridge here also prevents zombie processes after Stop.
+	// Stop cancels ctx before killing, so only an exit we did not ask for is recorded.
+	go func() {
+		defer d.wg.Done()
+		err := cmd.Wait()
+		_ = stderrW.Close()
+		if ctx.Err() != nil {
+			return
+		}
+		d.errMu.Lock()
+		if err == nil {
+			err = fmt.Errorf("exited unexpectedly")
+		}
+		d.exitErr = fmt.Errorf("NDI bridge stopped: %w (last output: %q)", err, d.lastStderr)
+		d.errMu.Unlock()
+		log.Printf("[NDIDistributor] %v", d.Err())
 	}()
 
 	go d.readLoop(ctx, stdout)
 
 	return nil
+}
+
+// Err returns the reason the NDI bridge exited unexpectedly, or nil while it is healthy.
+func (d *NDIDistributor) Err() error {
+	d.errMu.Lock()
+	defer d.errMu.Unlock()
+	return d.exitErr
 }
 
 // CopyLatestFrame copies the latest received NDI frame into dst.

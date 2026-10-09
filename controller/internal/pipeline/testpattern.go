@@ -7,7 +7,7 @@ import (
 	"booth-display/controller/internal/config"
 )
 
-// TestPatternGenerator generates dynamic 5792x540 BGR0 test pattern frames in memory.
+// TestPatternGenerator generates dynamic 5760x540 BGR0 test pattern frames in memory.
 // It includes SMPTE-style color bars, display boundary markers, display labels,
 // and a smoothly animated moving marker to easily verify synchronization and latency.
 type TestPatternGenerator struct {
@@ -23,7 +23,7 @@ type TestPatternGenerator struct {
 func NewTestPatternGenerator(canvas config.CanvasConfig, displays []config.DisplayConfig) *TestPatternGenerator {
 	w := canvas.Width
 	if w <= 0 {
-		w = 5792
+		w = config.DefaultCanvasWidth
 	}
 	h := canvas.Height
 	if h <= 0 {

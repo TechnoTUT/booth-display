@@ -88,6 +88,7 @@ type CanvasMixer struct {
 	sourceFront  []byte // double-buffered front frame
 	sourceBack   []byte // double-buffered back frame
 	blackFrame   []byte
+	nextBuf      []byte // incoming source frame during a transition
 	sourceMu     sync.RWMutex
 
 	// State
@@ -108,7 +109,7 @@ type CanvasMixer struct {
 func NewCanvasMixer(canvas config.CanvasConfig, displays []config.DisplayConfig) *CanvasMixer {
 	w := canvas.Width
 	if w <= 0 {
-		w = 5792
+		w = config.DefaultCanvasWidth
 	}
 	h := canvas.Height
 	if h <= 0 {
@@ -133,6 +134,7 @@ func NewCanvasMixer(canvas config.CanvasConfig, displays []config.DisplayConfig)
 		sourceFront:  make([]byte, frameSize),
 		sourceBack:   make([]byte, frameSize),
 		blackFrame:   make([]byte, frameSize),
+		nextBuf:      make([]byte, frameSize),
 		activeSource: "testpattern",
 		transition:   TransitionCut,
 		duration:     500 * time.Millisecond,
@@ -236,6 +238,17 @@ func (m *CanvasMixer) GetStatus() SceneStatus {
 		InTransition: m.inTransition,
 		Progress:     progress,
 	}
+}
+
+// SourceErr returns the reason the active external source (NDI bridge) exited unexpectedly, or nil.
+func (m *CanvasMixer) SourceErr() error {
+	m.mu.RLock()
+	d := m.ndiDist
+	m.mu.RUnlock()
+	if d == nil {
+		return nil
+	}
+	return d.Err()
 }
 
 // SwitchSource triggers a transition to a new source.
@@ -440,6 +453,7 @@ func (m *CanvasMixer) mixerLoop(ctx context.Context) {
 	interval := time.Second / time.Duration(m.fps)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var lastRender time.Time
 
 	for {
 		// If active source is NDI and distributor is running, listen to incoming frames directly
@@ -454,49 +468,52 @@ func (m *CanvasMixer) mixerLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ndiNotify:
-			// Frame arrived from NDI: render and broadcast immediately without waiting for ticker!
+			// NDI can deliver frames faster than the canvas rate. Render at most once per
+			// interval: a frame that arrives too early is picked up by the next tick.
+			if time.Since(lastRender) < interval {
+				continue
+			}
 			f := m.getFrame()
 			m.renderFrame(f.data)
 			m.broadcastFrame(f)
-			// Reset ticker to maintain proper timing fallback without double-pulsing
+			lastRender = time.Now()
+			// Reset ticker so it does not fire again right after an NDI-driven render
 			ticker.Reset(interval)
 		case <-ticker.C:
 			// Fallback or generator mode (test pattern, video, logo)
 			f := m.getFrame()
 			m.renderFrame(f.data)
 			m.broadcastFrame(f)
+			lastRender = time.Now()
 		}
 	}
 }
 
+// fetchSource writes the next frame of the given source into dst.
+func (m *CanvasMixer) fetchSource(source string, dst []byte) {
+	switch source {
+	case "ndi":
+		if m.ndiDist == nil || !m.ndiDist.CopyLatestFrame(dst) {
+			copy(dst, m.blackFrame)
+		}
+	case "video", "rainbow":
+		m.sourceMu.RLock()
+		copy(dst, m.sourceFront)
+		m.sourceMu.RUnlock()
+	case "logo":
+		copy(dst, m.logoGen.NextFrame())
+	default:
+		copy(dst, m.testPattern.NextFrame())
+	}
+}
+
+// renderFrame writes the next output frame into out. Must not be called concurrently.
 func (m *CanvasMixer) renderFrame(out []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var nextRaw []byte
-	sourceToFetch := m.activeSource
-	if m.inTransition {
-		sourceToFetch = m.nextSource
-	}
-
-	if sourceToFetch == "ndi" {
-		if m.ndiDist != nil && m.ndiDist.CopyLatestFrame(m.sourceFront) {
-			nextRaw = m.sourceFront
-		} else {
-			nextRaw = m.blackFrame
-		}
-	} else if sourceToFetch == "video" || sourceToFetch == "rainbow" {
-		m.sourceMu.RLock()
-		nextRaw = m.sourceFront
-		m.sourceMu.RUnlock()
-	} else if sourceToFetch == "logo" {
-		nextRaw = m.logoGen.NextFrame()
-	} else {
-		nextRaw = m.testPattern.NextFrame()
-	}
-
 	if !m.inTransition {
-		copy(out, nextRaw)
+		m.fetchSource(m.activeSource, out)
 		copy(m.currentFrame, out)
 		return
 	}
@@ -512,30 +529,37 @@ func (m *CanvasMixer) renderFrame(out []byte) {
 		m.nextSource = ""
 		m.nextTarget = ""
 		m.inTransition = false
-		copy(out, nextRaw)
+		m.fetchSource(m.activeSource, out)
 		copy(m.currentFrame, out)
 		return
 	}
 
+	nextRaw := m.nextBuf
+	m.fetchSource(m.nextSource, nextRaw)
+
+	// Blend weights are fixed-point with 8 fractional bits (0..256) so the per-byte
+	// loops below stay in integer arithmetic.
 	switch m.transition {
 	case TransitionFade:
 		// Linear crossfade: out = (1-p)*prev + p*next
-		alpha := progress
-		invAlpha := 1.0 - alpha
-		for i := 0; i < m.frameSize; i++ {
-			out[i] = byte(float64(m.prevFrame[i])*invAlpha + float64(nextRaw[i])*alpha)
+		alpha := int(progress * 256)
+		invAlpha := 256 - alpha
+		prev := m.prevFrame
+		for i := range out {
+			out[i] = byte((int(prev[i])*invAlpha + int(nextRaw[i])*alpha) >> 8)
 		}
 	case TransitionBlack:
 		// Dip to black: 0.0 -> 0.5 fade out prev to black, 0.5 -> 1.0 fade in next from black
 		if progress < 0.5 {
-			factor := (0.5 - progress) * 2.0 // 1.0 down to 0.0
-			for i := 0; i < m.frameSize; i++ {
-				out[i] = byte(float64(m.prevFrame[i]) * factor)
+			factor := int((0.5 - progress) * 2.0 * 256) // 256 down to 0
+			prev := m.prevFrame
+			for i := range out {
+				out[i] = byte((int(prev[i]) * factor) >> 8)
 			}
 		} else {
-			factor := (progress - 0.5) * 2.0 // 0.0 up to 1.0
-			for i := 0; i < m.frameSize; i++ {
-				out[i] = byte(float64(nextRaw[i]) * factor)
+			factor := int((progress - 0.5) * 2.0 * 256) // 0 up to 256
+			for i := range out {
+				out[i] = byte((int(nextRaw[i]) * factor) >> 8)
 			}
 		}
 	default: // Cut

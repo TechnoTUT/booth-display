@@ -218,7 +218,7 @@ def main():
     parser.add_argument("--discover", action="store_true", help="Discover available NDI sources and output JSON")
     parser.add_argument("--timeout", type=float, default=4.0, help="Max seconds to wait for discovery (--discover only)")
     parser.add_argument("--source", type=str, default="", help="NDI source name to stream")
-    parser.add_argument("--width", type=int, default=5792, help="Output canvas width")
+    parser.add_argument("--width", type=int, default=5760, help="Output canvas width")
     parser.add_argument("--height", type=int, default=540, help="Output canvas height")
     parser.add_argument("--fps", type=int, default=30, help="Output frame rate")
     parser.add_argument("--crop-mode", type=str, default="center", choices=["center", "stretch"], help="Crop mode: 'center' (default) or 'stretch'")

@@ -12,6 +12,8 @@ type PipelineStatus struct {
 	IsRunning  bool   `json:"is_running"`
 	ActiveMode string `json:"active_mode"`
 	VideoFile  string `json:"video_file"`
+	// Error is set when the encoder or the NDI bridge exited unexpectedly while running.
+	Error string `json:"error,omitempty"`
 }
 
 type PipelineEngine struct {
@@ -105,7 +107,7 @@ func (e *PipelineEngine) Start(mode string, mediaTarget string) error {
 	_ = e.mixer.SwitchSource(mode, mediaTarget, TransitionCut, 0)
 
 	// Launch the single encoder process fed by mixer.Subscribe()
-	if err := e.encoder.Start(snap.Canvas, e.mixer.Subscribe()); err != nil {
+	if err := e.encoder.Start(snap.Canvas, e.mixer.Subscribe); err != nil {
 		return fmt.Errorf("failed to start encoder: %w", err)
 	}
 
@@ -179,11 +181,19 @@ func (e *PipelineEngine) GetStatus() PipelineStatus {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	return PipelineStatus{
+	st := PipelineStatus{
 		IsRunning:  e.isRunning,
 		ActiveMode: e.activeMode,
 		VideoFile:  e.videoFile,
 	}
+	if err := e.encoder.Err(); err != nil {
+		st.Error = err.Error()
+	} else if e.mixer != nil {
+		if err := e.mixer.SourceErr(); err != nil {
+			st.Error = err.Error()
+		}
+	}
+	return st
 }
 
 // RebuildPipelines stops existing pipelines, reloads displays from config, and restarts if running.
@@ -197,7 +207,7 @@ func (e *PipelineEngine) RebuildPipelines(displays []config.DisplayConfig) error
 
 	if wasRunning && e.mixer != nil {
 		snap := e.cfgPool.GetSnapshot()
-		return e.encoder.Start(snap.Canvas, e.mixer.Subscribe())
+		return e.encoder.Start(snap.Canvas, e.mixer.Subscribe)
 	}
 	return nil
 }

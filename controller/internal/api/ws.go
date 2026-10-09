@@ -10,6 +10,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// wsWriteTimeout bounds how long one status message may take to reach a client.
+const wsWriteTimeout = 2 * time.Second
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow all local / LAN origins
@@ -81,15 +84,31 @@ func (m *WSManager) broadcastLoop() {
 				continue
 			}
 
+			// Write outside the lock, with a deadline: a stalled client must not block
+			// the other clients, HandleWS, or Close.
 			m.mu.Lock()
+			conns := make([]*websocket.Conn, 0, len(m.clients))
 			for conn := range m.clients {
-				err := conn.WriteMessage(websocket.TextMessage, data)
-				if err != nil {
+				conns = append(conns, conn)
+			}
+			m.mu.Unlock()
+
+			var failed []*websocket.Conn
+			for _, conn := range conns {
+				_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+				if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+					failed = append(failed, conn)
+				}
+			}
+
+			if len(failed) > 0 {
+				m.mu.Lock()
+				for _, conn := range failed {
 					conn.Close()
 					delete(m.clients, conn)
 				}
+				m.mu.Unlock()
 			}
-			m.mu.Unlock()
 		}
 	}
 }

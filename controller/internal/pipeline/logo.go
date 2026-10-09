@@ -85,7 +85,7 @@ type logoPixel struct {
 func NewLogoGenerator(canvas config.CanvasConfig, displays []config.DisplayConfig) *LogoGenerator {
 	w := canvas.Width
 	if w <= 0 {
-		w = 5792
+		w = config.DefaultCanvasWidth
 	}
 	h := canvas.Height
 	if h <= 0 {

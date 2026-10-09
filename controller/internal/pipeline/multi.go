@@ -30,10 +30,22 @@ type MultiEncoder struct {
 
 	cancelFn context.CancelFunc
 	cmd      *exec.Cmd
+	input    io.ReadCloser // frame stream feeding the current ffmpeg process
+	done     chan struct{} // closed once the current ffmpeg process has been reaped
 	wg       sync.WaitGroup
 	running  bool
 	mu       sync.Mutex
+
+	// exitErr is set by the monitor goroutine when ffmpeg exits without being stopped.
+	// It is guarded by errMu, not mu, because the monitor must never wait on mu.
+	exitErr error
+	errMu   sync.Mutex
 }
+
+// encoderStartupProbe is how long a freshly started ffmpeg must keep running before
+// it is considered healthy. An encoder that cannot open its device (e.g. VA-API)
+// exits within a few hundred milliseconds.
+const encoderStartupProbe = 2 * time.Second
 
 func NewMultiEncoder(displays []config.DisplayConfig, senders []*streamer.DisplaySender, pipelineCfg config.PipelineConfig) *MultiEncoder {
 	return &MultiEncoder{
@@ -160,8 +172,11 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 	return args
 }
 
-// Start launches the ffmpeg process reading frames from inputReader.
-func (m *MultiEncoder) Start(canvas config.CanvasConfig, inputReader io.Reader) error {
+// Start launches the ffmpeg process. subscribe must return a new frame stream on
+// every call: a failed attempt closes its stream, so the retry starts again from
+// a frame boundary instead of reading the rest of a half-consumed stream.
+// If VA-API fails during startup, the encoder falls back to libx264.
+func (m *MultiEncoder) Start(canvas config.CanvasConfig, subscribe func() io.ReadCloser) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -175,7 +190,7 @@ func (m *MultiEncoder) Start(canvas config.CanvasConfig, inputReader io.Reader) 
 	useVAAPI, vaDevice := determineEncoder(m.pipelineCfg)
 	if useVAAPI {
 		log.Printf("[MultiEncoder] Starting hardware encoder: VA-API (%s)", vaDevice)
-		err := m.startProcess(canvas, inputReader, true, vaDevice)
+		err := m.startProcess(canvas, subscribe(), true, vaDevice)
 		if err == nil {
 			return nil
 		}
@@ -183,15 +198,26 @@ func (m *MultiEncoder) Start(canvas config.CanvasConfig, inputReader io.Reader) 
 	}
 
 	log.Printf("[MultiEncoder] Starting software encoder: libx264 (ultrafast)")
-	return m.startProcess(canvas, inputReader, false, "")
+	return m.startProcess(canvas, subscribe(), false, "")
 }
 
-func (m *MultiEncoder) startProcess(canvas config.CanvasConfig, inputReader io.Reader, useVAAPI bool, vaDevice string) error {
+// Err returns the reason the ffmpeg process exited unexpectedly, or nil while it is healthy.
+func (m *MultiEncoder) Err() error {
+	m.errMu.Lock()
+	defer m.errMu.Unlock()
+	return m.exitErr
+}
+
+func (m *MultiEncoder) startProcess(canvas config.CanvasConfig, input io.ReadCloser, useVAAPI bool, vaDevice string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	args := buildMultiArgs(canvas, m.displays, useVAAPI, vaDevice)
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	cmd.Stdin = inputReader
+	cmd.Stdin = input
 	cmd.Stderr = os.Stderr
+
+	m.errMu.Lock()
+	m.exitErr = nil
+	m.errMu.Unlock()
 
 	readers := make([]*os.File, len(m.displays))
 	writers := make([]*os.File, len(m.displays))
@@ -219,6 +245,7 @@ func (m *MultiEncoder) startProcess(canvas config.CanvasConfig, inputReader io.R
 	if err := cmd.Start(); err != nil {
 		closeAll()
 		cancel()
+		_ = input.Close()
 		return fmt.Errorf("failed to start ffmpeg encoder: %w", err)
 	}
 	// The child holds its own copies of the write ends.
@@ -228,7 +255,25 @@ func (m *MultiEncoder) startProcess(canvas config.CanvasConfig, inputReader io.R
 
 	m.cancelFn = cancel
 	m.cmd = cmd
+	m.input = input
 	m.running = true
+
+	done := make(chan struct{})
+	m.done = done
+	go func() {
+		err := cmd.Wait()
+		// Only an exit we did not ask for counts as a failure; stopInternal cancels ctx first.
+		if ctx.Err() == nil {
+			if err == nil {
+				err = fmt.Errorf("ffmpeg exited unexpectedly")
+			}
+			m.errMu.Lock()
+			m.exitErr = fmt.Errorf("encoder stopped: %w", err)
+			m.errMu.Unlock()
+			log.Printf("[MultiEncoder] %v", m.Err())
+		}
+		close(done)
+	}()
 
 	for i, d := range m.displays {
 		m.wg.Add(1)
@@ -239,8 +284,19 @@ func (m *MultiEncoder) startProcess(canvas config.CanvasConfig, inputReader io.R
 		}(readers[i], d, m.senders[i])
 	}
 
-	go func() { _ = cmd.Wait() }()
-	return nil
+	// Startup probe: an encoder that cannot open its device exits almost at once.
+	// Report that as a failure so the caller can fall back to another encoder.
+	select {
+	case <-done:
+		err := m.Err()
+		if err == nil {
+			err = fmt.Errorf("ffmpeg exited during startup")
+		}
+		m.stopInternal()
+		return err
+	case <-time.After(encoderStartupProbe):
+		return nil
+	}
 }
 
 func (m *MultiEncoder) Stop() {
@@ -259,7 +315,15 @@ func (m *MultiEncoder) stopInternal() {
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Kill()
 	}
+	// Closing the frame stream unblocks ffmpeg's stdin copier so Wait can return.
+	if m.input != nil {
+		_ = m.input.Close()
+	}
 	m.wg.Wait()
+	// Reap ffmpeg before reporting the encoder as stopped.
+	if m.done != nil {
+		<-m.done
+	}
 	m.running = false
 }
 

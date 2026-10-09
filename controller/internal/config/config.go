@@ -14,6 +14,10 @@ type ServerConfig struct {
 	WSPingIntervalSec int `yaml:"ws_ping_interval_sec" json:"ws_ping_interval_sec"`
 }
 
+// DefaultCanvasWidth is the full canvas width (3 displays x 1920px). It is used
+// when the configured canvas width is missing or invalid.
+const DefaultCanvasWidth = 5760
+
 type CanvasConfig struct {
 	Width  int `yaml:"width" json:"width"`
 	Height int `yaml:"height" json:"height"`

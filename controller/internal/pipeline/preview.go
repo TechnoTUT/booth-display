@@ -91,7 +91,7 @@ func (p *PreviewPipeline) Start(mode string, mediaTarget string, canvas config.C
 
 	var args []string
 	previewWidth := 1280
-	// Keep aspect ratio of the canvas (e.g. 5792x540 -> 1280x119)
+	// Keep aspect ratio of the canvas (e.g. 5760x540 -> 1280x121)
 	scaleFilter := fmt.Sprintf("scale=%d:-1", previewWidth)
 
 	fps := 15 // 15 fps preview is smooth and very low CPU
