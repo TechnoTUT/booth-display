@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -118,15 +119,17 @@ func (h *APIHandler) HandleNDISources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sources, err := pipeline.DiscoverNDISources()
+	resp := map[string]interface{}{}
 	if err != nil {
-		// Log and return empty list instead of failing GUI
+		// Return an empty list and the reason so the GUI can show it instead of failing silently
+		log.Printf("[NDI] source discovery failed: %v", err)
 		sources = []pipeline.NDISource{}
+		resp["error"] = err.Error()
 	}
+	resp["sources"] = sources
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"sources": sources,
-	})
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (h *APIHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
