@@ -32,21 +32,26 @@ except ImportError as e:
     sys.exit(1)
 
 
-def discover_sources(timeout_sec: float = 1.0) -> list[dict]:
-    finder = Finder()
-    sources = []
-    end_time = time.time() + timeout_sec
-    while time.time() < end_time:
-        finder.wait_for_sources(0)
-        curr = list(finder)
-        if curr:
-            sources = curr
-            time.sleep(0.3)
-            finder.wait_for_sources(0)
-            sources = list(finder)
-            break
-        time.sleep(0.1)
+def discover_sources(timeout_sec: float = 4.0, settle_sec: float = 1.0) -> list[dict]:
+    """Wait until the NDI source list stops changing (for settle_sec) or timeout_sec elapses.
 
+    NDI senders are found over mDNS one by one, so stopping at the first hit
+    returns an incomplete list when many senders are on the network.
+    """
+    finder = Finder()
+    end_time = time.time() + timeout_sec
+    last_names: tuple[str, ...] = ()
+    last_change = time.time()
+    while time.time() < end_time:
+        finder.wait_for_sources(0.2)
+        names = tuple(sorted(s.name for s in finder))
+        if names != last_names:
+            last_names = names
+            last_change = time.time()
+        elif names and time.time() - last_change >= settle_sec:
+            break
+
+    sources = list(finder)
     result = []
     for s in sources:
         name = getattr(s, "name", "")
@@ -211,6 +216,7 @@ def stream_source(source_name: str, width: int, height: int, fps: int, crop_mode
 def main():
     parser = argparse.ArgumentParser(description="booth-display NDI bridge")
     parser.add_argument("--discover", action="store_true", help="Discover available NDI sources and output JSON")
+    parser.add_argument("--timeout", type=float, default=4.0, help="Max seconds to wait for discovery (--discover only)")
     parser.add_argument("--source", type=str, default="", help="NDI source name to stream")
     parser.add_argument("--width", type=int, default=5792, help="Output canvas width")
     parser.add_argument("--height", type=int, default=540, help="Output canvas height")
@@ -219,7 +225,7 @@ def main():
     args = parser.parse_args()
 
     if args.discover:
-        sources = discover_sources()
+        sources = discover_sources(timeout_sec=args.timeout)
         print(json.dumps(sources))
         sys.stdout.flush()
         os._exit(0)
