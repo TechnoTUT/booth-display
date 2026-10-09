@@ -101,7 +101,6 @@ const emit = defineEmits<{
           <select
             :value="selectedNdiSource"
             @change="emit('update:selectedNdiSource', ($event.target as HTMLSelectElement).value)"
-            :disabled="pipeline.is_running"
             class="flex-1 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2 text-sm font-mono text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-[#C7000A]"
           >
             <option value="" disabled>
@@ -114,7 +113,7 @@ const emit = defineEmits<{
 
           <button
             @click="emit('fetchNdiSources')"
-            :disabled="pipeline.is_running || isNdiScanning"
+            :disabled="isNdiScanning"
             class="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1.5 transition cursor-pointer"
             title="Scan for NDI sources"
           >

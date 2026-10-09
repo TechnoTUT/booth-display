@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import MonitorTab from './components/MonitorTab.vue'
 import ScenesTab from './components/ScenesTab.vue'
@@ -144,6 +144,7 @@ async function fetchConfig() {
 }
 
 async function fetchNdiSources() {
+  if (isNdiScanning.value) return
   isNdiScanning.value = true
   try {
     const res = await fetch('/api/ndi/sources')
@@ -274,6 +275,14 @@ async function handleSwitchScene(payload: {
   }
 }
 
+// While streaming, picking an NDI source switches the live output to it (cut).
+// When stopped, the choice is only stored and used by the next Play.
+async function handleNdiSourceChange(name: string) {
+  selectedNdiSource.value = name
+  if (!pipeline.value.is_running || selectedMode.value !== 'ndi' || !name) return
+  await handleSwitchScene({ sourceType: 'ndi', target: name, transition: 'cut', durationMs: 0 })
+}
+
 function connectWebSocket() {
   if (ws) ws.close()
 
@@ -317,6 +326,33 @@ function connectWebSocket() {
   }
 }
 
+// Re-scan NDI senders periodically while the NDI mode is selected, so the list
+// stays current even while a stream is running (discovery runs in its own process).
+const NDI_SCAN_INTERVAL_MS = 15000
+let ndiScanTimer: ReturnType<typeof setInterval> | undefined
+
+function startNdiScanTimer() {
+  if (ndiScanTimer !== undefined) return
+  ndiScanTimer = setInterval(() => {
+    if (selectedMode.value === 'ndi') fetchNdiSources()
+  }, NDI_SCAN_INTERVAL_MS)
+}
+
+function stopNdiScanTimer() {
+  if (ndiScanTimer === undefined) return
+  clearInterval(ndiScanTimer)
+  ndiScanTimer = undefined
+}
+
+watch(selectedMode, (mode) => {
+  if (mode === 'ndi') {
+    fetchNdiSources()
+    startNdiScanTimer()
+  } else {
+    stopNdiScanTimer()
+  }
+})
+
 onMounted(() => {
   const savedTheme = localStorage.getItem('theme')
   if (savedTheme === 'light') {
@@ -329,12 +365,14 @@ onMounted(() => {
 
   fetchConfig()
   fetchNdiSources()
+  if (selectedMode.value === 'ndi') startNdiScanTimer()
   fetchAssets()
   connectWebSocket()
 })
 
 onUnmounted(() => {
   if (ws) ws.close()
+  stopNdiScanTimer()
 })
 </script>
 
@@ -361,7 +399,8 @@ onUnmounted(() => {
         :is-action-loading="isActionLoading"
         v-model:selected-mode="selectedMode"
         v-model:video-file-path="videoFilePath"
-        v-model:selected-ndi-source="selectedNdiSource"
+        :selected-ndi-source="selectedNdiSource"
+        @update:selected-ndi-source="handleNdiSourceChange"
         :ndi-sources="ndiSources"
         :ndi-error="ndiError"
         :is-ndi-scanning="isNdiScanning"
