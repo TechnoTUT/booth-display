@@ -54,6 +54,7 @@ const selectedMode = ref<'testpattern' | 'rainbow' | 'logo' | 'video' | 'ndi'>('
 const videoFilePath = ref('')
 const selectedNdiSource = ref('')
 const ndiSources = ref<NDISourceItem[]>([])
+const ndiError = ref('')
 const isNdiScanning = ref(false)
 const assetFiles = ref<AssetFile[]>([])
 
@@ -149,12 +150,16 @@ async function fetchNdiSources() {
     if (res.ok) {
       const data = await res.json()
       ndiSources.value = data.sources || []
+      ndiError.value = data.error || ''
       if (!selectedNdiSource.value && ndiSources.value.length > 0) {
         selectedNdiSource.value = ndiSources.value[0].name
       }
+    } else {
+      ndiError.value = `HTTP ${res.status}`
     }
   } catch (err) {
     console.error('Failed to fetch NDI sources:', err)
+    ndiError.value = String(err)
   } finally {
     isNdiScanning.value = false
   }
@@ -358,6 +363,7 @@ onUnmounted(() => {
         v-model:video-file-path="videoFilePath"
         v-model:selected-ndi-source="selectedNdiSource"
         :ndi-sources="ndiSources"
+        :ndi-error="ndiError"
         :is-ndi-scanning="isNdiScanning"
         :sorted-metrics="sortedMetrics"
         @play="handlePlay"

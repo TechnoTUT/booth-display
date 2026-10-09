@@ -15,6 +15,7 @@ defineProps<{
   videoFilePath: string
   selectedNdiSource: string
   ndiSources: NDISourceItem[]
+  ndiError: string
   isNdiScanning: boolean
   sortedMetrics: DisplayMetrics[]
 }>()
@@ -103,7 +104,9 @@ const emit = defineEmits<{
             :disabled="pipeline.is_running"
             class="flex-1 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2 text-sm font-mono text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-[#C7000A]"
           >
-            <option value="" disabled>-- Select an NDI Source --</option>
+            <option value="" disabled>
+              {{ ndiSources.length === 0 && !isNdiScanning ? '-- No NDI Sources found --' : '-- Select an NDI Source --' }}
+            </option>
             <option v-for="src in ndiSources" :key="src.name" :value="src.name">
               {{ src.name }}
             </option>
@@ -119,6 +122,7 @@ const emit = defineEmits<{
             <span>{{ isNdiScanning ? 'Scanning...' : 'Scan NDI' }}</span>
           </button>
         </div>
+        <p v-if="selectedMode === 'ndi' && ndiError" class="w-full text-xs text-rose-500 font-mono break-all">NDI discovery error: {{ ndiError }}</p>
       </div>
     </div>
 
