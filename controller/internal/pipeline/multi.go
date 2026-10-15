@@ -121,7 +121,9 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 				"-aud", "1",
 				"-bf", "0",
 				"-g", fmt.Sprintf("%d", fps),
-				"-idr_interval", fmt.Sprintf("%d", fps),
+				// idr_interval counts I-frames, not frames: 0 makes every GOP start with an IDR
+				// (a value of fps would delay IDRs to every ~30 s, and receivers resync on IDR).
+				"-idr_interval", "0",
 				"-b:v", "4000k",
 				"-maxrate", "4000k",
 				"-bufsize", "150k",
