@@ -26,6 +26,10 @@ type DisplayMetrics struct {
 	LastSentAt  time.Time `json:"last_sent_at"`
 }
 
+// maxQueuedPackets bounds the send queue (~360 KB, under a second of video at 4 Mbps).
+// A deeper queue only adds latency once the network falls behind.
+const maxQueuedPackets = 256
+
 type DisplaySender struct {
 	cfg        config.DisplayConfig
 	conn       *net.UDPConn
@@ -34,18 +38,21 @@ type DisplaySender struct {
 	stopCh     chan struct{}
 	wg         sync.WaitGroup
 
+	// Only touched by SendFrame (single producer)
+	needKeyframe bool
+
 	packetsSent uint64
 	bytesSent   uint64
 	framesSent  uint64
 	drops       uint64
 
-	fpsCounter    uint64
-	byteCounter   uint64
-	currentFPS    float64
-	currentKbps   float64
-	lastSentAt    time.Time
-	mu            sync.RWMutex
-	seqNumber     uint32
+	fpsCounter  uint64
+	byteCounter uint64
+	currentFPS  float64
+	currentKbps float64
+	lastSentAt  time.Time
+	mu          sync.RWMutex
+	seqNumber   uint32
 }
 
 func NewDisplaySender(cfg config.DisplayConfig) (*DisplaySender, error) {
@@ -63,7 +70,7 @@ func NewDisplaySender(cfg config.DisplayConfig) (*DisplaySender, error) {
 		cfg:        cfg,
 		conn:       conn,
 		targetAddr: raddr,
-		queue:      make(chan []byte, 1024),
+		queue:      make(chan []byte, maxQueuedPackets),
 		stopCh:     make(chan struct{}),
 	}
 
@@ -119,18 +126,33 @@ func (s *DisplaySender) metricsLoop() {
 }
 
 // SendFrame splits frame into UDP packets and queues them.
+//
+// A frame is admitted only if all of its packets fit in the queue; otherwise the
+// whole frame is dropped. Packet-level drops would corrupt frames at the receiver,
+// and after any drop P-frames are skipped until the next keyframe so the decoder
+// never references a missing picture.
+//
+// SendFrame must be called from a single goroutine per sender: that guarantees the
+// free space checked below cannot be taken by another producer.
 func (s *DisplaySender) SendFrame(data []byte, payloadType byte, isKeyframe bool, timestampMs uint32) {
+	numPackets := (len(data) + protocol.DefaultMaxPayloadSize - 1) / protocol.DefaultMaxPayloadSize
+	if s.needKeyframe && !isKeyframe {
+		atomic.AddUint64(&s.drops, uint64(numPackets))
+		return
+	}
+	if numPackets > cap(s.queue)-len(s.queue) {
+		atomic.AddUint64(&s.drops, uint64(numPackets))
+		s.needKeyframe = true
+		return
+	}
+	s.needKeyframe = false
+
 	packets := protocol.Packetize(data, payloadType, isKeyframe, &s.seqNumber, timestampMs, protocol.DefaultMaxPayloadSize)
 	atomic.AddUint64(&s.framesSent, 1)
 	atomic.AddUint64(&s.fpsCounter, 1)
 
 	for _, pkt := range packets {
-		select {
-		case s.queue <- pkt:
-		default:
-			// Queue full - drop packet to avoid latency buildup
-			atomic.AddUint64(&s.drops, 1)
-		}
+		s.queue <- pkt
 	}
 }
 
