@@ -18,6 +18,7 @@ import argparse
 import http.server
 import io
 import json
+import queue
 import socket
 import struct
 import sys
@@ -108,6 +109,7 @@ class SimulatorState:
         self.fps = 0.0
         self.frames_received = 0
         self.packets_received = 0
+        self.packets_skipped = 0
         self.bytes_received = 0
         self.last_ts = 0
         self.last_nal_type = "None"
@@ -300,6 +302,7 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
                     "fps": round(self.state.fps, 1),
                     "frames_received": self.state.frames_received,
                     "packets_received": self.state.packets_received,
+                    "packets_skipped": self.state.packets_skipped,
                     "bytes_received": self.state.bytes_received,
                     "last_ts": self.state.last_ts,
                     "last_nal_type": self.state.last_nal_type,
@@ -337,6 +340,10 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
             return
 
         self.send_error(404)
+
+
+# ~1 s of video at 12 Mbps. A longer backlog means decoding cannot keep up.
+MAX_BACKLOG_PACKETS = 1000
 
 
 def render_jpeg(state: SimulatorState) -> Optional[bytes]:
@@ -409,8 +416,29 @@ def detect_au_nal_types(data: bytes) -> str:
 def udp_worker(state: SimulatorState):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Match the Android client's 2 MB receive buffer (the kernel may cap it at rmem_max).
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024)
     sock.bind(("0.0.0.0", state.udp_port))
     sock.settimeout(0.5)
+
+    # Receive on a dedicated thread so slow decoding cannot overflow the socket
+    # buffer and turn simulator lag into packet loss.
+    packet_q: "queue.Queue[Optional[bytes]]" = queue.Queue()
+
+    def receiver():
+        while True:
+            try:
+                data, _ = sock.recvfrom(2048)
+            except socket.timeout:
+                packet_q.put(None)
+                continue
+            except Exception:
+                packet_q.put(b"")
+                return
+            state.packets_received += 1
+            packet_q.put(data)
+
+    threading.Thread(target=receiver, daemon=True).start()
 
     codec = av.CodecContext.create("h264", "r")
     frame_count = 0
@@ -448,19 +476,26 @@ def udp_worker(state: SimulatorState):
     assembler = FrameAssembler(on_frame)
 
     while True:
-        try:
-            data, _ = sock.recvfrom(2048)
-            state.packets_received += 1
-            assembler.on_packet(data)
-        except socket.timeout:
+        data = packet_q.get()
+        if data is None:
             # Standby if no packets received for 2 seconds
             if state.last_frame_time > 0 and time.time() - state.last_frame_time > 2.0:
                 standby = create_standby_frame(state)
                 with state.lock:
                     state.latest_frame = None
                     state.latest_jpeg = standby
-        except Exception:
+            continue
+        if not data:
             break
+        backlog = packet_q.qsize()
+        if backlog > MAX_BACKLOG_PACKETS:
+            # Decoding fell behind: drop the backlog instead of showing ever older
+            # frames. The decoder recovers at the next IDR.
+            for _ in range(backlog):
+                packet_q.get_nowait()
+            state.packets_skipped += backlog
+            continue
+        assembler.on_packet(data)
 
 
 def main():
