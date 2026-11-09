@@ -44,7 +44,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             textDiagnostics.text = err
             textDiagnostics.setTextColor(android.graphics.Color.parseColor("#EF4444"))
         } else {
-            textDiagnostics.text = "Rx: ${receiver?.packetCount ?: 0} pkts | Ready"
+            val rcvBufKb = (receiver?.receiveBufferBytes ?: 0) / 1024
+            textDiagnostics.text = "Rx: ${receiver?.packetCount ?: 0} pkts | RcvBuf: ${rcvBufKb} KB | Ready"
             textDiagnostics.setTextColor(android.graphics.Color.parseColor("#64748B"))
         }
     }
