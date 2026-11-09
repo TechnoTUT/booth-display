@@ -55,7 +55,7 @@ A lightweight UDP-based protocol is used to avoid protocol overhead and the late
 - Magic: 0xBD (booth-display)
 - Version: 0x01
 - PayloadType:
-  - 0x01 = H.264 Access Unit (Annex-B): all NAL units of one frame (AUD, SPS/PPS/SEI when needed, and slices) combined into one unit. The encoder outputs Baseline with `aud=1:slices=1:repeat-headers=1`, and the controller assembles Access Units using the AUD as the boundary before sending. The receiver (MediaCodec) can pass them straight into the decoder's input buffer.
+  - 0x01 = H.264 Access Unit (Annex-B): all NAL units of one frame (AUD, SPS/PPS/SEI when needed, and slices) combined into one unit. The encoder outputs single-slice Baseline with an AUD on every frame, muxed as FLV (`-f flv`). Each FLV tag holds exactly one Access Unit with its size, so the controller converts it to Annex-B and sends it the moment its last byte arrives, inserting SPS/PPS before any IDR frame that lacks them. (Splitting a raw Annex-B stream on AUDs would hold every frame back until the next frame begins.) The receiver (MediaCodec) can pass them straight into the decoder's input buffer.
   - 0x02 = JPEG
   - 0x03 = RAW (defined only; a reserved value not used by the current pipeline)
 - Flags (bit flags, combined with OR):

@@ -72,11 +72,11 @@ flowchart TB
 - Single-process unified encoding (`MultiEncoder`):
   - One FFmpeg process receives a single rawvideo input of the whole canvas (5760x540).
   - `split` and `crop` filters cut it into one region per display.
-  - **Hardware acceleration (Intel VA-API)**: when `/dev/dri/renderD128` is available, frames go through `format=nv12,hwupload` to `h264_vaapi` (Constrained Baseline, AUD enabled, no B-frames) for low-latency encoding at very low CPU load.
+  - **Hardware acceleration (Intel VA-API)**: when `/dev/dri/renderD128` is available, the canvas is converted to `nv12` once, split, and each crop goes through `hwupload` to `h264_vaapi` (Constrained Baseline, AUD enabled, no B-frames) for low-latency encoding at very low CPU load.
   - **Software fallback**: if VA-API is missing or fails to initialize, it automatically falls back to `libx264` (ultrafast, zerolatency).
-  - Each display's output is passed through an extra pipe descriptor (`pipe:3`, `pipe:4`, ...) to its own goroutine.
+  - Each display's output is muxed as FLV and passed through an extra pipe descriptor (`pipe:3`, `pipe:4`, ...) to its own goroutine. FLV carries the size of every frame, so a frame is forwarded as soon as it is complete.
 - Packetization and UDP output:
-  - Parses Annex-B H.264 NAL units and splits each Access Unit (frame) into UDP packets with a 16-byte custom header.
+  - Converts each FLV-framed Access Unit (frame) to Annex-B H.264 and splits it into UDP packets with a 16-byte custom header.
   - Sends them asynchronously over UDP to each display's IP and port.
 
 ### (2) Web GUI and API

@@ -15,7 +15,7 @@ See [docs/](docs/) for the architecture and protocol details:
 - Go: 1.26 or later
 - Node.js: 20 or later
 - FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using an Intel GPU)
-- Intel VA-API driver (recommended: integrated graphics on 6th-gen Skylake or newer Intel CPUs, for fast encoding at low CPU load)
+- Intel VA-API driver for fast encoding at low CPU load: `intel-media-driver` (iHD) on 5th-gen Broadwell and newer, or the legacy `i965` driver on 3rd/4th-gen Ivy Bridge / Haswell (the reference target is a Core i5-3470)
 - uv: Python package manager (needed for NDI input and the client simulator)
 - To build the Android client:
   - JDK 17 or later
@@ -46,6 +46,22 @@ sudo apt update
 sudo apt install -y ffmpeg vainfo intel-media-va-driver-non-free
 # (for the open-source driver, use intel-media-driver or intel-media-va-driver instead)
 ```
+
+#### Ivy Bridge / Haswell (e.g. Core i5-3470)
+
+The iHD driver does not support these GPUs. Install the legacy i965 driver instead and select it:
+
+```bash
+# AlmaLinux / RHEL / Fedora (RPM Fusion)
+sudo dnf install -y libva-intel-driver
+# Ubuntu / Debian
+sudo apt install -y i965-va-driver
+
+# Only needed when both drivers are installed
+export LIBVA_DRIVER_NAME=i965
+```
+
+`vainfo` should then list `VAProfileH264ConstrainedBaseline : VAEntrypointEncSlice`. The i965 driver prints a `Not using hybrid_drv_video.so` notice; it is harmless. If VA-API cannot start, the controller falls back to libx264, which still keeps up with three 1920x540 outputs on a Core i5-3470 class CPU.
 
 ### 2. Verify
 
