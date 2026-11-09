@@ -22,6 +22,7 @@ class UdpStreamReceiver(
     companion object {
         private const val TAG = "UdpStreamReceiver"
         private const val BUFFER_SIZE = 2048 // Standard MTU is <= 1500
+        private const val REQUESTED_RCVBUF = 2 * 1024 * 1024
     }
 
     private val isRunning = AtomicBoolean(false)
@@ -34,6 +35,11 @@ class UdpStreamReceiver(
 
     @Volatile
     var lastError: String? = null
+        private set
+
+    /** Receive buffer the kernel actually granted (capped by net.core.rmem_max), or 0 before bind. */
+    @Volatile
+    var receiveBufferBytes: Int = 0
         private set
 
     /** Frames discarded because the decoder fell behind. */
@@ -76,9 +82,17 @@ class UdpStreamReceiver(
 
                 // Set 2MB receive buffer after bind (prevent SocketException on some Android OS)
                 try {
-                    sock.receiveBufferSize = 2 * 1024 * 1024
+                    sock.receiveBufferSize = REQUESTED_RCVBUF
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not set receiveBufferSize: ${e.message}")
+                }
+                // The kernel silently caps the request at net.core.rmem_max (and Linux
+                // reports double the usable size), so log what we really got.
+                receiveBufferBytes = try { sock.receiveBufferSize } catch (e: Exception) { 0 }
+                if (receiveBufferBytes < REQUESTED_RCVBUF) {
+                    Log.w(TAG, "Receive buffer capped: requested $REQUESTED_RCVBUF, got $receiveBufferBytes bytes")
+                } else {
+                    Log.i(TAG, "Receive buffer: $receiveBufferBytes bytes")
                 }
 
                 socket = sock
