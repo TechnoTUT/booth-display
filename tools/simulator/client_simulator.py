@@ -100,6 +100,11 @@ class SimulatorState:
         self.height = height
         self.lock = threading.Lock()
         self.latest_jpeg: Optional[bytes] = None
+        # Latest decoded picture. It is converted to JPEG lazily, only when a viewer
+        # asks for it, so decoding never waits on JPEG encoding.
+        self.latest_frame = None
+        self.frame_seq = 0
+        self.jpeg_seq = 0
         self.fps = 0.0
         self.frames_received = 0
         self.packets_received = 0
@@ -317,8 +322,7 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
             while True:
-                with self.state.lock:
-                    jpeg = self.state.latest_jpeg
+                jpeg = render_jpeg(self.state)
 
                 if jpeg:
                     try:
@@ -333,6 +337,28 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
             return
 
         self.send_error(404)
+
+
+def render_jpeg(state: SimulatorState) -> Optional[bytes]:
+    with state.lock:
+        frame, seq = state.latest_frame, state.frame_seq
+        if frame is None or seq == state.jpeg_seq:
+            return state.latest_jpeg
+    bgr = frame.to_ndarray(format="bgr24")
+    if bgr.shape[1] != state.width or bgr.shape[0] != state.height:
+        bgr = cv2.resize(bgr, (state.width, state.height))
+    if state.show_osd:
+        cv2.rectangle(bgr, (20, 20), (520, 80), (0, 0, 0), -1)
+        cv2.putText(bgr, f"{state.display_id} | {state.fps:.1f} FPS | {state.last_nal_type}", (30, 45),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(bgr, f"1920x540 | UDP :{state.udp_port} | TS: {state.last_ts}ms", (30, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+    _, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    with state.lock:
+        if seq >= state.jpeg_seq:
+            state.latest_jpeg = jpeg.tobytes()
+            state.jpeg_seq = seq
+        return state.latest_jpeg
 
 
 def create_standby_frame(state: SimulatorState) -> bytes:
@@ -410,22 +436,10 @@ def udp_worker(state: SimulatorState):
                 try:
                     frames = codec.decode(pkt)
                     for f in frames:
-                        state.last_frame_time = time.time()
-                        bgr = f.to_ndarray(format="bgr24")
-                        if bgr.shape[1] != state.width or bgr.shape[0] != state.height:
-                            bgr = cv2.resize(bgr, (state.width, state.height))
-
-                        # Render small OSD badge
-                        if state.show_osd and time.time() - state.last_frame_time < 5.0:
-                            cv2.rectangle(bgr, (20, 20), (520, 80), (0, 0, 0), -1)
-                            cv2.putText(bgr, f"{state.display_id} | {state.fps:.1f} FPS | {state.last_nal_type}", (30, 45),
-                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                            cv2.putText(bgr, f"1920x540 | UDP :{state.udp_port} | TS: {state.last_ts}ms", (30, 70),
-                                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
-
-                        _, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
                         with state.lock:
-                            state.latest_jpeg = jpeg.tobytes()
+                            state.last_frame_time = time.time()
+                            state.latest_frame = f
+                            state.frame_seq += 1
                 except Exception:
                     pass
         except Exception:
@@ -441,8 +455,10 @@ def udp_worker(state: SimulatorState):
         except socket.timeout:
             # Standby if no packets received for 2 seconds
             if state.last_frame_time > 0 and time.time() - state.last_frame_time > 2.0:
+                standby = create_standby_frame(state)
                 with state.lock:
-                    state.latest_jpeg = create_standby_frame(state)
+                    state.latest_frame = None
+                    state.latest_jpeg = standby
         except Exception:
             break
 
