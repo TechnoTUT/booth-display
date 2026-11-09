@@ -109,6 +109,7 @@ class SimulatorState:
         self.fps = 0.0
         self.frames_received = 0
         self.packets_received = 0
+        self.packets_lost = 0
         self.packets_skipped = 0
         self.bytes_received = 0
         self.last_ts = 0
@@ -302,6 +303,7 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
                     "fps": round(self.state.fps, 1),
                     "frames_received": self.state.frames_received,
                     "packets_received": self.state.packets_received,
+                    "packets_lost": self.state.packets_lost,
                     "packets_skipped": self.state.packets_skipped,
                     "bytes_received": self.state.bytes_received,
                     "last_ts": self.state.last_ts,
@@ -426,6 +428,7 @@ def udp_worker(state: SimulatorState):
     packet_q: "queue.Queue[Optional[bytes]]" = queue.Queue()
 
     def receiver():
+        last_seq = -1
         while True:
             try:
                 data, _ = sock.recvfrom(2048)
@@ -436,6 +439,13 @@ def udp_worker(state: SimulatorState):
                 packet_q.put(b"")
                 return
             state.packets_received += 1
+            if len(data) >= 8:
+                seq = struct.unpack("!I", data[4:8])[0]
+                if last_seq >= 0:
+                    gap = (seq - last_seq - 1) & 0xFFFFFFFF
+                    if 0 < gap < 1 << 20:
+                        state.packets_lost += gap
+                last_seq = seq
             packet_q.put(data)
 
     threading.Thread(target=receiver, daemon=True).start()
