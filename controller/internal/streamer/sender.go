@@ -26,7 +26,7 @@ type DisplayMetrics struct {
 	LastSentAt  time.Time `json:"last_sent_at"`
 }
 
-// maxQueuedPackets bounds the send queue (~360 KB, under a second of video at 4 Mbps).
+// maxQueuedPackets bounds the send queue (~360 KB, about 0.25 s of video at 12 Mbps).
 // A deeper queue only adds latency once the network falls behind.
 const maxQueuedPackets = 256
 
