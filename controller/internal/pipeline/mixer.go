@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"booth-display/controller/internal/config"
@@ -331,6 +332,14 @@ func (m *CanvasMixer) startNDILocked(sourceName string) error {
 	return nil
 }
 
+// expandPipeBuffer attempts to expand the OS pipe buffer capacity on Linux to reduce context switching.
+func expandPipeBuffer(rc io.ReadCloser) {
+	if f, ok := rc.(interface{ Fd() uintptr }); ok {
+		// F_SETPIPE_SZ = 1031 on Linux, set to 512KB (safe for unprivileged user)
+		_, _, _ = syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), 1031, 524288)
+	}
+}
+
 func (m *CanvasMixer) startVideoLocked(filePath string) error {
 	m.stopExternalSourcesLocked()
 
@@ -446,14 +455,35 @@ func (m *CanvasMixer) stopExternalSourcesLocked() {
 	}
 }
 
-// mixerLoop outputs frames driven by NDI frame arrival (zero latency) or timer ticker.
+// mixerLoop renders a frame whenever the NDI source delivers one, so a frame
+// goes to the encoder the moment it arrives. The ticker paces generator
+// sources (test pattern, video, logo) and stands in when NDI frames stop.
+//
+// The ticker must not compete with NDI arrivals: a ticker of exactly 30 Hz
+// beats against a 29.97 fps source, and whenever it fires just before a frame
+// arrives it would render the old frame and push the new one back a full
+// interval. So while NDI frames keep coming, ticks are skipped.
 func (m *CanvasMixer) mixerLoop(ctx context.Context) {
 	defer m.wg.Done()
 
 	interval := time.Second / time.Duration(m.fps)
+	// An NDI frame is rendered once 60% of an interval has passed since the
+	// last render. That absorbs arrival jitter of a 30 fps source while still
+	// thinning a faster source to about the canvas rate.
+	minGap := interval * 6 / 10
+	// Ticks are skipped while the last NDI frame is more recent than this.
+	ndiLive := interval * 3 / 2
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	var lastRender time.Time
+	var lastRender, lastNDI time.Time
+
+	render := func() {
+		f := m.getFrame()
+		m.renderFrame(f.data)
+		m.broadcastFrame(f)
+		lastRender = time.Now()
+	}
 
 	for {
 		// If active source is NDI and distributor is running, listen to incoming frames directly
@@ -468,23 +498,16 @@ func (m *CanvasMixer) mixerLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ndiNotify:
-			// NDI can deliver frames faster than the canvas rate. Render at most once per
-			// interval: a frame that arrives too early is picked up by the next tick.
-			if time.Since(lastRender) < interval {
+			lastNDI = time.Now()
+			if time.Since(lastRender) < minGap {
 				continue
 			}
-			f := m.getFrame()
-			m.renderFrame(f.data)
-			m.broadcastFrame(f)
-			lastRender = time.Now()
-			// Reset ticker so it does not fire again right after an NDI-driven render
-			ticker.Reset(interval)
+			render()
 		case <-ticker.C:
-			// Fallback or generator mode (test pattern, video, logo)
-			f := m.getFrame()
-			m.renderFrame(f.data)
-			m.broadcastFrame(f)
-			lastRender = time.Now()
+			if ndiNotify != nil && time.Since(lastNDI) < ndiLive {
+				continue
+			}
+			render()
 		}
 	}
 }
