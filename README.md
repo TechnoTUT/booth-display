@@ -1,42 +1,42 @@
 # booth-display
 
-LG Display製 LD290EJS-FPN1 (1920x540) を使用した連接ブースディスプレイを制御・同期表示するためのコントローラシステムです。
+A controller system that drives a tiled booth display built from LG Display LD290EJS-FPN1 panels (1920x540) and keeps them in sync.
 
-Web-GUIを内包したスタンドアロン単一バイナリとして動作し、全体仮想キャンバスの映像をディスプレイごとにクロップ分割して低遅延UDP (H.264 Annex-B) で同時送出します。
+It runs as a standalone single binary with a built-in Web GUI. It crops a single virtual canvas into one region per display and streams all of them at once over low-latency UDP (H.264 Annex-B).
 
-詳細なアーキテクチャやプロトコル仕様は [docs/](docs/) を参照してください。
-- システムアーキテクチャ: [docs/architecture.md](docs/architecture.md)
-- 映像伝送プロトコル仕様: [docs/streaming-protocol.md](docs/streaming-protocol.md)
-- 開発時の注意事項・環境設定: [docs/development.md](docs/development.md)
+See [docs/](docs/) for the architecture and protocol details:
+- System architecture: [docs/architecture.md](docs/architecture.md)
+- Video streaming protocol: [docs/streaming-protocol.md](docs/streaming-protocol.md)
+- Development notes and environment setup: [docs/development.md](docs/development.md)
 
-## 必要要件
+## Requirements
 
-- OS: Linux (Debian 12+, Ubuntu 22.04+, AlmaLinux / RHEL 9+, Fedora 39+ など)
-- Go: 1.26 以上
-- Node.js: 20 以上
-- FFmpeg: 6.0 以上 (`libx264` 有効、Intel GPU 利用時は `h264_vaapi` 有効)
-- Intel VA-API ドライバ (推奨: 第6世代 Skylake 以降の Intel CPU 内蔵グラフィックスで低CPU負荷・高速エンコードを実現)
-- uv: Python パッケージマネージャ (NDI 入力利用時、およびクライアントシミュレータ利用時)
-- (Android クライアントをビルドする場合)
-  - JDK 17 以上
+- OS: Linux (Debian 12+, Ubuntu 22.04+, AlmaLinux / RHEL 9+, Fedora 39+, etc.)
+- Go: 1.26 or later
+- Node.js: 20 or later
+- FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using an Intel GPU)
+- Intel VA-API driver (recommended: integrated graphics on 6th-gen Skylake or newer Intel CPUs, for fast encoding at low CPU load)
+- uv: Python package manager (needed for NDI input and the client simulator)
+- To build the Android client:
+  - JDK 17 or later
   - Android SDK (`platforms;android-34`, `build-tools;34.0.0`)
-  - SDK の場所を `android-client/local.properties` の `sdk.dir=...` または環境変数 `ANDROID_HOME` で指定
+  - Point to the SDK with `sdk.dir=...` in `android-client/local.properties` or with the `ANDROID_HOME` environment variable
 
 ---
 
-## FFmpeg & ハードウェア支援 (VA-API) セットアップ
+## FFmpeg and hardware acceleration (VA-API) setup
 
-コントローラは、Intel CPU 内蔵グラフィックス (Intel HD / UHD Graphics) の **VA-API (`h264_vaapi`)** によるハードウェア支援エンコードに対応しています。CPU 負荷を最小限に抑え、複数ディスプレイへの 30fps 同時リアルタイム送出を安定化できます（VA-API 非搭載環境では自動的に CPU ソフトウェアエンコード `libx264` にフォールバックします）。
+The controller supports hardware-accelerated encoding through **VA-API (`h264_vaapi`)** on Intel integrated graphics (Intel HD / UHD Graphics). This keeps CPU load to a minimum and makes simultaneous real-time 30 fps output to several displays stable. On systems without VA-API it automatically falls back to CPU software encoding with `libx264`.
 
-### 1. パッケージのインストール
+### 1. Install packages
 
 #### AlmaLinux / Rocky Linux / RHEL / Fedora
 ```bash
-# RPM Fusion / EPEL リポジトリの有効化 (未導入の場合)
+# Enable the RPM Fusion / EPEL repositories (if not already enabled)
 sudo dnf install -y epel-release
 sudo dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm
 
-# FFmpeg および VA-API ドライバ・診断ツールのインストール
+# Install FFmpeg, the VA-API driver and diagnostic tools
 sudo dnf install -y ffmpeg libva-utils intel-media-driver
 ```
 
@@ -44,117 +44,117 @@ sudo dnf install -y ffmpeg libva-utils intel-media-driver
 ```bash
 sudo apt update
 sudo apt install -y ffmpeg vainfo intel-media-va-driver-non-free
-# (オープンソース版ドライバを利用する場合は intel-media-driver または intel-media-va-driver)
+# (for the open-source driver, use intel-media-driver or intel-media-va-driver instead)
 ```
 
-### 2. 動作確認
+### 2. Verify
 
 ```bash
-# VA-API デバイスが認識されているか確認 (renderD128 等が存在すること)
+# Check that a VA-API device is present (e.g. renderD128)
 ls -l /dev/dri/renderD*
 
-# H.264 エンコード (VAEntrypointEncSlice) に対応しているか確認
+# Check for H.264 encode support (VAEntrypointEncSlice)
 vainfo
 
-# FFmpeg が VA-API エンコーダに対応しているか確認
+# Check that FFmpeg has the VA-API encoder
 ffmpeg -hide_banner -encoders | grep h264_vaapi
 ```
 
-> **Note**: 実行ユーザが `/dev/dri/renderD128` にアクセス権を持つ必要があります（必要に応じて `sudo usermod -aG render $USER` または `video` グループに追加して再ログインしてください）。
+> **Note**: The user running the controller needs access to `/dev/dri/renderD128`. If needed, add the user to the `render` (or `video`) group with `sudo usermod -aG render $USER` and log in again.
 
 ---
 
-## ビルド手順
+## Building
 
-ルートディレクトリの Makefile を使って、フロントエンド (Vue 3) とバックエンド (Go) を一括ビルドできます。フロントエンドのビルド成果物は Go バイナリ内に静的に埋め込まれます。
+The Makefile in the repository root builds the frontend (Vue 3) and the backend (Go) together. The frontend build output is embedded into the Go binary.
 
 ```bash
-# フロントエンド・バックエンドの一括ビルド
+# Build frontend and backend
 make build
 
-# テストの実行
+# Run tests
 make test
 ```
 
-ビルドが完了すると、`controller/bin/display-controller` が生成されます。
+The build produces `controller/bin/display-controller`.
 
-開発時用の個別コマンド:
+Individual targets for development:
 ```bash
-make build-frontend  # フロントエンドのみビルド
-make build-backend   # Go コントローラのみビルド
-make dev-frontend    # フロントエンド開発サーバ起動 (Vite)
+make build-frontend  # Build the frontend only
+make build-backend   # Build the Go controller only
+make dev-frontend    # Start the frontend dev server (Vite)
 ```
 
 ---
 
-## 起動方法
+## Running
 
-生成されたバイナリに設定ファイルを指定して実行します。
+Run the binary with a config file:
 
 ```bash
-# 通常起動
+# Start normally
 ./controller/bin/display-controller -config config.yaml
 
-# または make コマンドで起動
+# Or start via make
 make run
 ```
 
-起動後、ブラウザで以下のURLを開きます。
-- Web-GUI ダッシュボード: `http://localhost:8080`
+Then open the dashboard in a browser:
+- Web GUI dashboard: `http://localhost:8080`
 
 ---
 
-## Androidクライアントアプリ (android-client/)
+## Android client app (android-client/)
 
-LG Display LD290EJS-FPN1 (Android 7.1 / 1920x540) 上で動作する映像受信・表示アプリです。
+The app that receives and displays the video on the LG Display LD290EJS-FPN1 (Android 7.1 / 1920x540).
 
-### 特徴
-- MediaCodec によるハードウェア H.264 デコード (SurfaceView 直接描画)
-- 1GB RAM 向け省メモリ設計 (中間 Bitmap 不使用により OOM を抑制)
-- イマーシブ全画面表示および端末起動時自動起動 (BOOT_COMPLETED)
+### Features
+- Hardware H.264 decoding with MediaCodec, rendering directly to a SurfaceView
+- Low-memory design for 1 GB RAM (no intermediate Bitmaps, which avoids OOM)
+- Immersive full-screen mode and auto-start on boot (BOOT_COMPLETED)
 
-### ビルド手順
-事前に「必要要件」の Android SDK を用意してください。
+### Building
+Set up the Android SDK listed under Requirements first.
 
 ```bash
 cd android-client
 
-# デバッグ版 (署名済み。端末へそのままインストール可能)
+# Debug build (signed, so it can be installed on the device as is)
 ./gradlew assembleDebug
 ```
-生成物: `android-client/app/build/outputs/apk/debug/app-debug.apk`
+Output: `android-client/app/build/outputs/apk/debug/app-debug.apk`
 
 ```bash
-# 端末へのインストール
+# Install on the device
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-> リリース版 (`./gradlew assembleRelease`) は署名設定がないため、`app-release-unsigned.apk` が生成され、署名しないと端末にインストールできません。
+> The release build (`./gradlew assembleRelease`) has no signing config, so it produces `app-release-unsigned.apk`, which cannot be installed until you sign it.
 
-## Python 環境 (NDI ブリッジ / シミュレータ)
+## Python environment (NDI bridge / simulator)
 
-NDI 入力 (`cyndilib`) とクライアントシミュレータ (`av`) の依存は、リポジトリ直下の `pyproject.toml` で管理され、`.venv` に作成されます。
+The dependencies for NDI input (`cyndilib`) and the client simulator (`av`) are managed in `pyproject.toml` at the repository root and installed into `.venv`.
 
 ```bash
 make setup-python   # uv sync
 ```
 
-コントローラはリポジトリ直下から起動してください (`uv run --project .` で `.venv` を参照します)。
+Start the controller from the repository root (it uses `uv run --project .` to find `.venv`).
 
-## クライアントシミュレータ (tools/simulator/)
+## Client simulator (tools/simulator/)
 
-実機がなくても、UDP で受信した H.264 ストリームをデコードして Web ブラウザ上で確認できます。Python 環境はリポジトリ直下の `pyproject.toml` から `uv` で `.venv` として自動作成されます (`make setup-python`)。
+Lets you check the stream without real hardware: it decodes the H.264 stream received over UDP and shows it in a web browser. The Python environment is created automatically as `.venv` by `uv` from the root `pyproject.toml` (`make setup-python`).
 
 ```bash
-# display-1 (UDP :8554) のシミュレータを起動。ブラウザで http://localhost:9001 を開く
+# Start the simulator for display-1 (UDP :8554), then open http://localhost:9001
 make run-simulator
 ```
 
-## 設定 (config.yaml)
+## Configuration (config.yaml)
 
-サーバポート、全体仮想キャンバス解像度、各ディスプレイの宛先IP/ポートおよびクロップ座標を設定します。
+Sets the server ports, the virtual canvas resolution, and each display's destination IP/port and crop position.
 
-> 以下の例の `ip: "127.0.0.1"` はローカル検証 (シミュレータ) 用です。実機で運用する場合は、各ディスプレイ (Android クライアント) の実際の IP アドレスに変更してください。
+> `ip: "127.0.0.1"` in the example below is for local testing with the simulator. For real hardware, change it to the actual IP address of each display (Android client).
 
 ```yaml
 server:
@@ -199,16 +199,16 @@ displays:
     bezel_padding_right: 0
 
 media:
-  default_mode: "testpattern" # "testpattern", "video", または "ndi"
+  default_mode: "testpattern" # "testpattern", "video", or "ndi"
   video_file: ""
 
 pipeline:
-  encoder: "auto" # "auto" (VA-API優先・自動フォールバック), "vaapi", または "software"
-  vaapi_device: "/dev/dri/renderD128" # VA-API デバイスノード
+  encoder: "auto" # "auto" (prefer VA-API, fall back automatically), "vaapi", or "software"
+  vaapi_device: "/dev/dri/renderD128" # VA-API device node
 ```
 
 ---
 
-## ライセンス
+## License
 
 [MIT License](LICENSE)
