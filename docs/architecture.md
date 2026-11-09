@@ -1,30 +1,30 @@
-# アーキテクチャ設計書 (Architecture Design)
+# Architecture Design
 
-本書では、連接ブースディスプレイシステム booth-display の全体アーキテクチャおよびコントローラの実装方針について記述します。
+This document describes the overall architecture of booth-display, the tiled booth display system, and how the controller is implemented.
 
 ---
 
-## 1. 全体システムアーキテクチャ
+## 1. System architecture
 
-システムは以下の主要コンポーネントで構成されます。
+The system consists of the following main components.
 
 ```mermaid
 flowchart TB
-    subgraph Controller["ディスプレイコントローラ (Go / Linux)"]
-        WebGUI["Web-GUI (HTML/JS)"]
+    subgraph Controller["Display controller (Go / Linux)"]
+        WebGUI["Web GUI (HTML/JS)"]
         APIServer["HTTP / WebSocket API"]
-        ConfigMgr["設定マネージャ (config.yaml)"]
+        ConfigMgr["Config manager (config.yaml)"]
         
-        subgraph MediaSources["入力ソース"]
-            TestPattern["内蔵テストパターン"]
-            VideoFile["ローカル動画ファイル (MP4)"]
-            NDISource["NDIネットワーク映像 (cyndilib / uv: リポジトリ直下の .venv)"]
+        subgraph MediaSources["Input sources"]
+            TestPattern["Built-in test pattern"]
+            VideoFile["Local video file (MP4)"]
+            NDISource["NDI network video (cyndilib / uv: .venv in repo root)"]
         end
 
-        CanvasEngine["仮想キャンバス &<br/>クロップ分割エンジン"]
-        EncoderPool["マルチ出力統合エンコーダ (MultiEncoder)<br/>(Intel VA-API / x264 zerolatency)"]
-        StreamServer["ストリーミング送出サーバ<br/>(UDP Server)"]
-        PreviewHub["MJPEG プレビューハブ<br/>(/api/preview/mjpeg)"]
+        CanvasEngine["Virtual canvas &<br/>crop engine"]
+        EncoderPool["Unified multi-output encoder (MultiEncoder)<br/>(Intel VA-API / x264 zerolatency)"]
+        StreamServer["Streaming server<br/>(UDP Server)"]
+        PreviewHub["MJPEG preview hub<br/>(/api/preview/mjpeg)"]
         
         WebGUI <--> APIServer
         APIServer --> ConfigMgr
@@ -35,7 +35,7 @@ flowchart TB
     end
 
     subgraph Network["LAN (100BASE-TX)"]
-        Switch["L2 スイッチ"]
+        Switch["L2 switch"]
     end
 
     subgraph Client1["Android Client #1 (1920x540)"]
@@ -59,48 +59,48 @@ flowchart TB
 
 ---
 
-## 2. ディスプレイコントローラ内部設計 (`controller/`)
+## 2. Display controller internals (`controller/`)
 
-### (1) パイプライン構成
-- 入力ソース処理:
-  - 内蔵テストパターン（Go ネイティブ生成）
-  - ローカル動画ファイル（MP4 / H.264）
-  - NDIネットワーク映像（Python cyndilib / uv による rawvideo パイプ受信）
-- 仮想キャンバスミキサー (`CanvasMixer`):
-  - 30fpsの一定周期でフレームを合成・トランジション（カット、クロスフェード、黒転換）処理。
-  - バッファプール（`sync.Pool`）と参照カウント方式により、購読者ごとのメモリコピーを排除（ゼロコピー配信）。
-- 単一プロセス統合エンコード (`MultiEncoder`):
-  - 1つのFFmpegプロセスに全体キャンバス (5760x540) の rawvideo を1系統のみ入力。
-  - `split` および `crop` フィルタで各ディスプレイ領域へ分割。
-  - **ハードウェア支援 (Intel VA-API)**: `/dev/dri/renderD128` が利用可能な場合、`format=nv12,hwupload` を経由して `h264_vaapi`（Constrained Baseline, AUD有効, Bフレームなし）で低遅延・超低CPU負荷エンコード。
-  - **ソフトウェアフォールバック**: VA-API 非搭載または初期化失敗時は自動で `libx264`（ultrafast, zerolatency）にフォールバック。
-  - 各画面の出力は追加パイプディスクリプタ (`pipe:3`, `pipe:4`, ...) 経由で独立ゴルーチンへ送出。
-- パケット化 & UDP送出:
-  - Annex-B H.264 NALユニットを解析し、Access Unit (フレーム) 単位で16バイトのカスタムヘッダ付きUDPパケットにフラグメント分割。
-  - 宛先ディスプレイのIPおよびポートへ非同期UDP送出。
+### (1) Pipeline
+- Input sources:
+  - Built-in test pattern (generated natively in Go)
+  - Local video file (MP4 / H.264)
+  - NDI network video (rawvideo received over a pipe from Python cyndilib, run with uv)
+- Virtual canvas mixer (`CanvasMixer`):
+  - Composites frames at a fixed 30 fps and handles transitions (cut, crossfade, fade to black).
+  - A buffer pool (`sync.Pool`) with reference counting avoids a memory copy per subscriber (zero-copy fan-out).
+- Single-process unified encoding (`MultiEncoder`):
+  - One FFmpeg process receives a single rawvideo input of the whole canvas (5760x540).
+  - `split` and `crop` filters cut it into one region per display.
+  - **Hardware acceleration (Intel VA-API)**: when `/dev/dri/renderD128` is available, frames go through `format=nv12,hwupload` to `h264_vaapi` (Constrained Baseline, AUD enabled, no B-frames) for low-latency encoding at very low CPU load.
+  - **Software fallback**: if VA-API is missing or fails to initialize, it automatically falls back to `libx264` (ultrafast, zerolatency).
+  - Each display's output is passed through an extra pipe descriptor (`pipe:3`, `pipe:4`, ...) to its own goroutine.
+- Packetization and UDP output:
+  - Parses Annex-B H.264 NAL units and splits each Access Unit (frame) into UDP packets with a 16-byte custom header.
+  - Sends them asynchronously over UDP to each display's IP and port.
 
-### (2) Web-GUI & API管理
-- Web-GUI (`controller/frontend/`):
-  - Vue 3 (Composition API / `<script setup>`) + Vite + Tailwind CSS を採用。
-  - TechnoTUTデザインシステムに準拠し、ダーク/ライトテーマに対応。
-  - Viteビルド成果物 (`controller/web/dist`) をGoの `embed.FS` により単一バイナリ内に完全同梱。
-  - ディスプレイの接続状況モニタリング（WebSocket経由でのリアルタイムFPS・ビットレート・ドロップ率可視化）。
-  - 仮想キャンバスのトポロジー表示、ライブMJPEGプレビュー、クロップ枠オーバーレイ。
-  - 設定テーブルからのIP、ポート、解像度、クロップ位置、ベゼル幅の動的編集と保存。
-- WebSocket制御チャンネル:
-  - クライアントおよびWeb-GUIとの双方向通信、毎秒のテレメトリ配信。
+### (2) Web GUI and API
+- Web GUI (`controller/frontend/`):
+  - Built with Vue 3 (Composition API / `<script setup>`), Vite and Tailwind CSS.
+  - Follows the TechnoTUT design system, with dark and light themes.
+  - The Vite build output (`controller/web/dist`) is embedded in the single binary through Go's `embed.FS`.
+  - Monitors display connection status (real-time FPS, bitrate and drop rate over WebSocket).
+  - Shows the virtual canvas topology, a live MJPEG preview, and crop-region overlays.
+  - Lets you edit and save each display's IP, port, resolution, crop position and bezel width from the settings table.
+- WebSocket control channel:
+  - Two-way communication with clients and the Web GUI, with telemetry sent every second.
 
-### (3) NDIブリッジ連携
+### (3) NDI bridge
 - `controller/scripts/ndi_bridge.py`:
-  - Pythonの `cyndilib` を使用してNDIソースの自動検出およびフレーム受信を実行。
-  - コントローラ本体からはリポジトリ直下の uv プロジェクト (`pyproject.toml` / `.venv`、`make setup-python` で作成) を `uv run --project .` で参照して呼び出し (コントローラはリポジトリ直下から起動する必要がある)、キャンバス解像度にスケーリングされたrawvideoストリームをUNIXパイプ経由でGoパイプラインへ供給。
+  - Uses Python's `cyndilib` to discover NDI sources and receive frames.
+  - The controller runs it with `uv run --project .` against the uv project in the repository root (`pyproject.toml` / `.venv`, created by `make setup-python`), so the controller must be started from the repository root. The script feeds a rawvideo stream, scaled to the canvas resolution, into the Go pipeline over a UNIX pipe.
 
 ---
 
-## 3. Androidクライアント内部設計 (`android-client/`)
+## 3. Android client internals (`android-client/`)
 
-- 動作環境: Android 7.1 (API 25), ARM Cortex-A17 4Core, 1GB RAM
-- 役割:
-  - UDPパケットの受信とフラグメント再構築
-  - MediaCodecによるハードウェアH.264デコード（Cortex-A17 VPU活用）
-  - SurfaceViewによるフルスクリーン描画（イマーシブモード）
+- Target: Android 7.1 (API 25), ARM Cortex-A17 quad-core, 1 GB RAM
+- Responsibilities:
+  - Receive UDP packets and reassemble fragments
+  - Hardware H.264 decoding with MediaCodec (using the Cortex-A17 VPU)
+  - Full-screen rendering to a SurfaceView (immersive mode)
