@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -84,8 +86,16 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 	}
 	n := len(displays)
 
+	// Convert the canvas to 4:2:0 once, before splitting, instead of once per
+	// display, and let the filter graph use every core. Measured on a 3-display
+	// canvas: about 8 ms lower median latency and a much tighter p90.
+	// (In 4:2:0 a crop offset is rounded down to an even pixel.)
+	pixFmt := "yuv420p"
+	if useVAAPI {
+		pixFmt = "nv12"
+	}
 	var fc strings.Builder
-	fmt.Fprintf(&fc, "[0:v]split=%d", n)
+	fmt.Fprintf(&fc, "[0:v]format=%s,split=%d", pixFmt, n)
 	for i := range displays {
 		fmt.Fprintf(&fc, "[s%d]", i)
 	}
@@ -93,12 +103,13 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 	var args []string
 	if useVAAPI {
 		for i, d := range displays {
-			fmt.Fprintf(&fc, ";[s%d]crop=%d:%d:%d:%d,format=nv12,hwupload[o%d]", i, d.Width, d.Height, d.CropX, d.CropY, i)
+			fmt.Fprintf(&fc, ";[s%d]crop=%d:%d:%d:%d,hwupload[o%d]", i, d.Width, d.Height, d.CropX, d.CropY, i)
 		}
 
 		args = []string{
 			"-hide_banner", "-loglevel", "error",
-			"-fflags", "nobuffer",
+			// No "-fflags nobuffer": with a rawvideo pipe input on ffmpeg 7 it holds
+			// every frame back by one frame interval (measured: 15 ms -> 49 ms).
 			"-flags", "low_delay",
 			"-probesize", "32",
 			"-analyzeduration", "0",
@@ -109,6 +120,7 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 			"-s", fmt.Sprintf("%dx%d", canvas.Width, canvas.Height),
 			"-r", fmt.Sprintf("%d", fps),
 			"-i", "pipe:0",
+			"-filter_threads", strconv.Itoa(runtime.NumCPU()),
 			"-filter_complex", fc.String(),
 		}
 		for i := range displays {
@@ -133,7 +145,10 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 				"-maxrate", "12000k",
 				"-bufsize", "1000k",
 				"-an",
-				"-f", "h264",
+				// FLV, not raw h264: each tag carries its size, so a frame can be
+				// forwarded as soon as it is written (see FLVReader).
+				"-f", "flv",
+				"-flvflags", "no_duration_filesize",
 				fmt.Sprintf("pipe:%d", 3+i),
 			)
 		}
@@ -144,7 +159,8 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 
 		args = []string{
 			"-hide_banner", "-loglevel", "error",
-			"-fflags", "nobuffer",
+			// No "-fflags nobuffer": with a rawvideo pipe input on ffmpeg 7 it holds
+			// every frame back by one frame interval (measured: 15 ms -> 49 ms).
 			"-flags", "low_delay",
 			"-probesize", "32",
 			"-analyzeduration", "0",
@@ -153,6 +169,7 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 			"-s", fmt.Sprintf("%dx%d", canvas.Width, canvas.Height),
 			"-r", fmt.Sprintf("%d", fps),
 			"-i", "pipe:0",
+			"-filter_threads", strconv.Itoa(runtime.NumCPU()),
 			"-filter_complex", fc.String(),
 		}
 		for i := range displays {
@@ -168,10 +185,16 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 				"-g", fmt.Sprintf("%d", fps),
 				// Receiver-friendly H.264: one slice per frame, AUD at every access
 				// unit boundary, in-band SPS/PPS, Baseline profile.
+				// threads=1: frame threading delays every frame by (threads - 1) frames
+				// (sliced-threads=0 measured 213 ms vs 16 ms), and sliced threading
+				// ignores slices=1. One thread per display easily keeps up at ultrafast.
 				"-profile:v", "baseline",
-				"-x264-params", "slices=1:sliced-threads=0:aud=1:repeat-headers=1",
+				"-x264-params", "threads=1:slices=1:aud=1:repeat-headers=1",
 				"-an",
-				"-f", "h264",
+				// FLV, not raw h264: each tag carries its size, so a frame can be
+				// forwarded as soon as it is written (see FLVReader).
+				"-f", "flv",
+				"-flvflags", "no_duration_filesize",
 				fmt.Sprintf("pipe:%d", 3+i),
 			)
 		}
@@ -334,34 +357,25 @@ func (m *MultiEncoder) stopInternal() {
 	m.running = false
 }
 
-// pumpH264 parses an Annex-B H.264 stream into Access Units and sends each one
-// to the display sender.
+// pumpH264 reads the encoder's FLV output and sends each H.264 Access Unit to
+// the display sender as soon as its last byte arrives.
 func pumpH264(ctx context.Context, r io.Reader, id string, sender *streamer.DisplaySender) {
-	parser := NewNALUParser()
-	assembler := NewAccessUnitAssembler()
-	chunk := make([]byte, 16*1024)
+	fr := NewFLVReader(r)
 	startTime := time.Now()
 
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		n, err := r.Read(chunk)
-		if n > 0 {
-			for _, nal := range parser.Push(chunk[:n]) {
-				if au := assembler.Push(nal); au != nil {
-					ts := uint32(time.Since(startTime).Milliseconds())
-					sender.SendFrame(au.Data, protocol.PayloadTypeH264, au.IsKeyframe, ts)
-				}
-			}
-		}
+		data, isKey, err := fr.Next()
 		if err != nil {
-			if err != io.EOF && ctx.Err() == nil {
+			if err != io.EOF && err != io.ErrUnexpectedEOF && ctx.Err() == nil {
 				log.Printf("[%s] ffmpeg pipe read error: %v", id, err)
 			}
 			return
 		}
+		if ctx.Err() != nil {
+			return
+		}
+		ts := uint32(time.Since(startTime).Milliseconds())
+		// SendFrame copies data into packets before returning, so the reader's buffer can be reused.
+		sender.SendFrame(data, protocol.PayloadTypeH264, isKey, ts)
 	}
 }
