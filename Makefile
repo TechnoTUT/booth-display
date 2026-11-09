@@ -28,7 +28,7 @@ run: build
 dev-frontend:
 	npm --prefix controller/frontend run dev
 
-# Python 環境 (.venv) をリポジトリ直下に作成 (NDI ブリッジ / シミュレータ用)
+# Python 環境 (.venv) をリポジトリ直下に作成 (シミュレータ用 / cyndilib 同梱の NDI ランタイム libndi)
 setup-python:
 	uv sync
 

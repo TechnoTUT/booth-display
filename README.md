@@ -16,7 +16,8 @@ See [docs/](docs/) for the architecture and protocol details:
 - Node.js: 20 or later
 - FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using an Intel GPU)
 - Intel VA-API driver for fast encoding at low CPU load: `intel-media-driver` (iHD) on 5th-gen Broadwell and newer, or the legacy `i965` driver on 3rd/4th-gen Ivy Bridge / Haswell (the reference target is a Core i5-3470)
-- uv: Python package manager (needed for NDI input and the client simulator)
+- NDI runtime (`libndi.so.6`) for NDI input: the NDI SDK / runtime for Linux, or the copy bundled with `cyndilib` in `.venv` (`make setup-python`)
+- uv: Python package manager (needed for the client simulator, and for the bundled NDI runtime)
 - To build the Android client:
   - JDK 17 or later
   - Android SDK (`platforms;android-34`, `build-tools;34.0.0`)
@@ -147,15 +148,25 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 > The release build (`./gradlew assembleRelease`) has no signing config, so it produces `app-release-unsigned.apk`, which cannot be installed until you sign it.
 
-## Python environment (NDI bridge / simulator)
+## NDI runtime
 
-The dependencies for NDI input (`cyndilib`) and the client simulator (`av`) are managed in `pyproject.toml` at the repository root and installed into `.venv`.
+The controller receives NDI directly through the NDI SDK library (`libndi`), loaded at runtime. It looks for it in this order:
+
+1. `$NDI_RUNTIME_DIR_V6/libndi.so.6` (the NDI SDK's environment variable)
+2. `libndi.so.6` / `libndi.so` on the system library path (NDI SDK or runtime installed)
+3. The copy bundled with the Python `cyndilib` package in `.venv` at the repository root (or a parent of the working directory)
+
+Without it, everything except NDI input works, and the GUI shows why NDI is unavailable. The bundled copy is the easiest option:
 
 ```bash
-make setup-python   # uv sync
+make setup-python   # uv sync: creates .venv with cyndilib (bundled libndi) and the simulator dependencies
 ```
 
-Start the controller from the repository root (it uses `uv run --project .` to find `.venv`).
+NDI finds senders over mDNS (UDP 5353). If a firewall blocks it, list sender addresses in the NDI configuration file (`~/.ndi/ndi-config.v1.json`, or the directory named by `NDI_CONFIG_DIR`):
+
+```json
+{"ndi": {"networks": {"ips": "192.168.1.20,192.168.1.21"}}}
+```
 
 ## Client simulator (tools/simulator/)
 

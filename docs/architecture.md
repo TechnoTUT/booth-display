@@ -18,7 +18,7 @@ flowchart TB
         subgraph MediaSources["Input sources"]
             TestPattern["Built-in test pattern"]
             VideoFile["Local video file (MP4)"]
-            NDISource["NDI network video (cyndilib / uv: .venv in repo root)"]
+            NDISource["NDI network video (libndi via cgo)"]
         end
 
         CanvasEngine["Virtual canvas &<br/>crop engine"]
@@ -65,9 +65,9 @@ flowchart TB
 - Input sources:
   - Built-in test pattern (generated natively in Go)
   - Local video file (MP4 / H.264)
-  - NDI network video (rawvideo received over a pipe from Python cyndilib, run with uv)
+  - NDI network video (received in-process through libndi, scaled onto the canvas)
 - Virtual canvas mixer (`CanvasMixer`):
-  - Composites frames at a fixed 30 fps and handles transitions (cut, crossfade, fade to black).
+  - Composites frames at the canvas rate (30 fps), driven by NDI frame arrival when NDI is active, and handles transitions (cut, crossfade, fade to black).
   - A buffer pool (`sync.Pool`) with reference counting avoids a memory copy per subscriber (zero-copy fan-out).
 - Single-process unified encoding (`MultiEncoder`):
   - One FFmpeg process receives a single rawvideo input of the whole canvas (5760x540).
@@ -90,10 +90,13 @@ flowchart TB
 - WebSocket control channel:
   - Two-way communication with clients and the Web GUI, with telemetry sent every second.
 
-### (3) NDI bridge
-- `controller/scripts/ndi_bridge.py`:
-  - Uses Python's `cyndilib` to discover NDI sources and receive frames.
-  - The controller runs it with `uv run --project .` against the uv project in the repository root (`pyproject.toml` / `.venv`, created by `make setup-python`), so the controller must be started from the repository root. The script feeds a rawvideo stream, scaled to the canvas resolution, into the Go pipeline over a UNIX pipe.
+### (3) NDI input
+- `controller/internal/ndi`: calls the NDI SDK (`libndi`) through cgo. The library is loaded with `dlopen` at runtime (see the README for the search order), so the controller builds and runs without it; only NDI input is unavailable then.
+  - Discovery waits for the source list to settle, because senders are found over mDNS one by one.
+  - The receiver asks for video only (BGRX, full bandwidth, progressive). Audio and metadata are not requested, so the SDK discards them instead of queueing them.
+  - When several frames are queued, only the newest is used.
+- `NDIDistributor` (`controller/internal/pipeline/ndi.go`) forwards each frame the moment it arrives: it center-crops and bilinearly scales it onto the canvas (`scale.go`, all cores, no SIMD dependency) and signals the mixer. A source faster than the canvas rate is thinned to about the canvas rate.
+- The mixer renders on NDI frame arrival; its ticker only paces generator sources and stands in when NDI frames stop, so a 29.97 fps source is not held back by a 30 Hz clock.
 
 ---
 
