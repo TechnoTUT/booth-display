@@ -124,9 +124,14 @@ func buildMultiArgs(canvas config.CanvasConfig, displays []config.DisplayConfig,
 				// idr_interval counts I-frames, not frames: 0 makes every GOP start with an IDR
 				// (a value of fps would delay IDRs to every ~30 s, and receivers resync on IDR).
 				"-idr_interval", "0",
-				"-b:v", "4000k",
-				"-maxrate", "4000k",
-				"-bufsize", "150k",
+				// The iHD driver's CBR control starves quality when the HRD buffer is tiny:
+				// with 150k it padded frames to the bitrate and still left visible blocking
+				// at any rate. A 1M buffer lets it spend the bits (moving test clip:
+				// 31.5 dB PSNR at 4M/150k, 60 dB at 12M/1M). 12 Mbps x 3 displays stays
+				// well inside a 100 Mbps wired link.
+				"-b:v", "12000k",
+				"-maxrate", "12000k",
+				"-bufsize", "1000k",
 				"-an",
 				"-f", "h264",
 				fmt.Sprintf("pipe:%d", 3+i),
