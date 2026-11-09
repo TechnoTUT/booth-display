@@ -191,6 +191,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 val rxPkts = receiver?.packetCount ?: 0L
                 val rendered = decoder.renderedFrameCount
                 val err = decoder.lastError ?: receiver?.lastError
+                val dropped = receiver?.droppedFrames ?: 0L
+                val dropText = if (dropped > 0) " | Drop: $dropped" else ""
 
                 if (!isStreamingActive) {
                     isStreamingActive = true
@@ -211,7 +213,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                     } else if (rendered > 0) {
                         textMetrics.text = String.format("%.1f FPS (Rend: %d)", fps, rendered)
                         textMetrics.setTextColor(android.graphics.Color.parseColor("#10B981"))
-                        textDiagnostics.text = "Rx: $rxPkts pkts | NAL: ${decoder.lastNalType} | Rend: $rendered"
+                        textDiagnostics.text = "Rx: $rxPkts pkts | NAL: ${decoder.lastNalType} | Rend: $rendered$dropText"
                         textDiagnostics.setTextColor(android.graphics.Color.parseColor("#10B981"))
                     } else {
                         textMetrics.text = String.format("%.1f FPS (Waiting IDR)", fps)

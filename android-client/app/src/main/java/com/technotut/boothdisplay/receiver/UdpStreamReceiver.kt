@@ -11,6 +11,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * High-performance UDP socket listener on dedicated background thread.
+ *
+ * [onFrameReceived] runs on a separate decode thread (see [FrameDispatcher]), so a
+ * slow decoder never stalls the socket reads.
  */
 class UdpStreamReceiver(
     private val port: Int = 8554,
@@ -33,12 +36,19 @@ class UdpStreamReceiver(
     var lastError: String? = null
         private set
 
+    /** Frames discarded because the decoder fell behind. */
+    val droppedFrames: Long
+        get() = dispatcher.droppedFrames
+
+    private val dispatcher = FrameDispatcher(onFrameReceived)
+
     private val assembler = FrameAssembler { frame, isKeyframe, timestamp ->
-        onFrameReceived(frame, isKeyframe, timestamp)
+        dispatcher.offer(frame, isKeyframe, timestamp)
     }
 
     fun start() {
         if (isRunning.getAndSet(true)) return
+        dispatcher.start()
 
         workerThread = Thread({
             try {
@@ -113,6 +123,7 @@ class UdpStreamReceiver(
 
     fun stop() {
         isRunning.set(false)
+        dispatcher.stop()
         try {
             socket?.close()
         } catch (e: Exception) {
