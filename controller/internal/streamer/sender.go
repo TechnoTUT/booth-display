@@ -132,6 +132,10 @@ func (s *DisplaySender) metricsLoop() {
 // and after any drop P-frames are skipped until the next keyframe so the decoder
 // never references a missing picture.
 //
+// A frame larger than the whole queue is admitted when the queue is empty, and the
+// caller waits while sendLoop drains it. Without this, such a keyframe could never
+// be sent and the stream would stall until a smaller keyframe arrived.
+//
 // SendFrame must be called from a single goroutine per sender: that guarantees the
 // free space checked below cannot be taken by another producer.
 func (s *DisplaySender) SendFrame(data []byte, payloadType byte, isKeyframe bool, timestampMs uint32) {
@@ -140,7 +144,8 @@ func (s *DisplaySender) SendFrame(data []byte, payloadType byte, isKeyframe bool
 		atomic.AddUint64(&s.drops, uint64(numPackets))
 		return
 	}
-	if numPackets > cap(s.queue)-len(s.queue) {
+	queued := len(s.queue)
+	if numPackets > cap(s.queue)-queued && queued > 0 {
 		atomic.AddUint64(&s.drops, uint64(numPackets))
 		s.needKeyframe = true
 		return
@@ -152,7 +157,12 @@ func (s *DisplaySender) SendFrame(data []byte, payloadType byte, isKeyframe bool
 	atomic.AddUint64(&s.fpsCounter, 1)
 
 	for _, pkt := range packets {
-		s.queue <- pkt
+		select {
+		case s.queue <- pkt:
+		case <-s.stopCh:
+			// sendLoop is gone; an oversized frame would otherwise block forever.
+			return
+		}
 	}
 }
 
