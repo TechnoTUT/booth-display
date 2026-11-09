@@ -1,39 +1,39 @@
-# 映像伝送・プロトコル設計書 (Streaming Protocol & Low Latency Design)
+# Streaming Protocol & Low Latency Design
 
-本書では、エンコード遅延の削減とネットワーク帯域制限（100BASE-TX）を両立するためのストリーミングプロトコル選定およびパケット設計について記述します。
+This document explains how the streaming protocol was chosen and how packets are laid out, so as to keep encoding latency low while staying within the bandwidth of a 100BASE-TX network.
 
 ---
 
-## 1. 帯域・遅延トレードオフの比較分析
+## 1. Bandwidth vs. latency trade-offs
 
-### (1) 画面1台あたりの通信量計算 (解像度: 1920 × 540)
+### (1) Data rate per display (resolution: 1920 × 540)
 
-| 形式 | 1フレームあたりのデータ量 | 30 fps 時の必要帯域 | 60 fps 時の必要帯域 | 100BASE-TX (実効 ~90Mbps) での可否 |
+| Format | Data per frame | Bandwidth at 30 fps | Bandwidth at 60 fps | Fits 100BASE-TX (~90 Mbps effective)? |
 | :--- | :--- | :--- | :--- | :--- |
-| 完全無圧縮 (RGB24) | 1920 × 540 × 3 = 3.11 MB | 746.5 Mbps | 1,493 Mbps | 不可 (帯域大幅超過) |
-| 完全無圧縮 (YUV420p)| 1920 × 540 × 1.5 = 1.55 MB | 373.2 Mbps | 746.5 Mbps | 不可 (帯域大幅超過) |
-| 低負荷圧縮: MJPEG (Quality 80) | 約 80 KB 〜 120 KB | 19.2 〜 28.8 Mbps | 38.4 〜 57.6 Mbps | 可能 |
-| 低遅延 H.264 (Baseline, zerolatency) | 平均 約 17 KB (既定 4000 kbps 指定、30 fps 時) | 4.0 Mbps (既定。シーンにより変動) | 8.0 Mbps (同画質を保つ場合の目安) | 極めて余裕 |
+| Uncompressed (RGB24) | 1920 × 540 × 3 = 3.11 MB | 746.5 Mbps | 1,493 Mbps | No (far over the limit) |
+| Uncompressed (YUV420p) | 1920 × 540 × 1.5 = 1.55 MB | 373.2 Mbps | 746.5 Mbps | No (far over the limit) |
+| Light compression: MJPEG (quality 80) | about 80 KB – 120 KB | 19.2 – 28.8 Mbps | 38.4 – 57.6 Mbps | Yes |
+| Low-latency H.264 (Baseline, zerolatency) | about 17 KB on average (default 4000 kbps at 30 fps) | 4.0 Mbps (default; varies with the scene) | 8.0 Mbps (rough figure for the same quality) | Yes, with plenty of headroom |
 
-### (2) 採用方針
-- 完全無圧縮 (RAW):
-  - 100BASE-TX LANの物理上限（100Mbps）を大幅に超過するため採用不可。
-- 採用方針: 低遅延 H.264 (ゼロレイテンシ設定):
-  - 送信側エンコード遅延: x264（preset=ultrafast, tune=zerolatency, Bフレームなし）により5〜10ms程度。
-  - 受信側デコード遅延: Android 7.1の MediaCodec (Cortex-A17 VPU) により3〜5ms程度。
-  - 必要帯域: 既定で 1台あたり 4 Mbps (x264 の `-b:v` / `-maxrate` = 4000k、シーンにより変動) と低く、ネットワーク輻輳・パケットロスのリスクが最小。
-  - Android端末のCPU負荷・発熱が低く、1GB RAM環境でも安定動作。
-- MJPEG の位置づけ:
-  - MJPEG は Web-GUI 向けプレビュー (`/api/preview/mjpeg`) 専用であり、ディスプレイへの UDP 送出は H.264 のみ。
-  - パケットの PayloadType `0x02 (JPEG)` は予約値で、現状の UDP 送出では使用していない。
+### (2) Decision
+- Uncompressed (RAW):
+  - Rejected, because it far exceeds the physical limit of a 100BASE-TX LAN (100 Mbps).
+- Chosen: low-latency H.264 (zero-latency settings):
+  - Encode latency on the sender: about 5–10 ms with x264 (preset=ultrafast, tune=zerolatency, no B-frames).
+  - Decode latency on the receiver: about 3–5 ms with MediaCodec on Android 7.1 (Cortex-A17 VPU).
+  - Bandwidth: 4 Mbps per display by default (x264 `-b:v` / `-maxrate` = 4000k, varying with the scene). This is low enough to keep the risk of congestion and packet loss minimal.
+  - Low CPU load and heat on the Android devices, and stable even with 1 GB RAM.
+- Role of MJPEG:
+  - MJPEG is used only for the Web GUI preview (`/api/preview/mjpeg`). Only H.264 is sent to the displays over UDP.
+  - The packet PayloadType `0x02 (JPEG)` is reserved and not used by the current UDP output.
 
 ---
 
-## 2. パケット伝送プロトコル仕様 (UDP Streaming)
+## 2. Packet protocol (UDP streaming)
 
-通信オーバーヘッドと遅延（TCPの再送待ちによる頭止め遅延: Head-of-line blocking）を排除するため、UDPベースの軽量プロトコルを採用しています。
+A lightweight UDP-based protocol is used to avoid protocol overhead and the latency of TCP retransmission (head-of-line blocking).
 
-### (1) パケットフォーマット (Custom Lightweight Header)
+### (1) Packet format (custom lightweight header)
 
 ```
  0                   1                   2                   3
@@ -55,18 +55,18 @@
 - Magic: 0xBD (booth-display)
 - Version: 0x01
 - PayloadType:
-  - 0x01 = H.264 Access Unit (Annex-B)。1フレーム分の全NAL (AUD, 必要に応じて SPS/PPS/SEI, スライス) を1つにまとめたもの。エンコーダは `aud=1:slices=1:repeat-headers=1` のBaselineで出力し、コントローラが AUD を境界に Access Unit を組み立てて送出する。受信側 (MediaCodec) はそのままデコーダの入力バッファに渡せる。
+  - 0x01 = H.264 Access Unit (Annex-B): all NAL units of one frame (AUD, SPS/PPS/SEI when needed, and slices) combined into one unit. The encoder outputs Baseline with `aud=1:slices=1:repeat-headers=1`, and the controller assembles Access Units using the AUD as the boundary before sending. The receiver (MediaCodec) can pass them straight into the decoder's input buffer.
   - 0x02 = JPEG
-  - 0x03 = RAW (定義のみ。現状のパイプラインでは使用していない予約値)
-- Flags (ビットフラグ。OR で組み合わせる):
-  - 0x01 (Marker): フレーム末尾パケットであることを示す
-  - 0x02 (Keyframe): SPS/PPS または IDR スライスを含むことを示す
-- Sequence Number: パケット抜け・順序入れ替わりの検知用（32ビット連番）
-- Timestamp: コントローラ基準の再生タイムスタンプ（ミリ秒）
-- Fragment Index / Total: 1フレーム(NAL)をペイロード上限で分割して再構築するためのインデックス (各16ビット)
+  - 0x03 = RAW (defined only; a reserved value not used by the current pipeline)
+- Flags (bit flags, combined with OR):
+  - 0x01 (Marker): the last packet of a frame
+  - 0x02 (Keyframe): the frame contains SPS/PPS or an IDR slice
+- Sequence Number: detects lost and reordered packets (32-bit counter)
+- Timestamp: presentation timestamp from the controller's clock (milliseconds)
+- Fragment Index / Total: index for splitting one frame (NAL) at the payload limit and reassembling it (16 bits each)
 
-#### バイトオーダーとサイズ
-- ヘッダは固定 16 バイト。複数バイトのフィールド (Sequence Number / Timestamp / Fragment Index / Fragment Total) はすべて ネットワークバイトオーダー (Big Endian)。
-  - オフセット: Magic=0, Version=1, PayloadType=2, Flags=3, Sequence Number=4–7, Timestamp=8–11, Fragment Index=12–13, Fragment Total=14–15
-- 最大ペイロードは 1400 バイト (`DefaultMaxPayloadSize`)。
-  - 1400 (ペイロード) + 16 (独自ヘッダ) + 28 (IPv4 20 + UDP 8) = 1444 バイトとなり、標準的な Ethernet MTU 1500 バイト以内に収まるため、IP フラグメンテーションが発生しない。
+#### Byte order and size
+- The header is a fixed 16 bytes. All multi-byte fields (Sequence Number / Timestamp / Fragment Index / Fragment Total) are in network byte order (big-endian).
+  - Offsets: Magic=0, Version=1, PayloadType=2, Flags=3, Sequence Number=4–7, Timestamp=8–11, Fragment Index=12–13, Fragment Total=14–15
+- The maximum payload is 1400 bytes (`DefaultMaxPayloadSize`).
+  - 1400 (payload) + 16 (custom header) + 28 (IPv4 20 + UDP 8) = 1444 bytes, which fits within the standard 1500-byte Ethernet MTU, so no IP fragmentation occurs.
