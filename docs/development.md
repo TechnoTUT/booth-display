@@ -1,55 +1,55 @@
-# 開発ガイド & 注意事項 (Development Guide & Notes)
+# Development Guide & Notes
 
-本書では、booth-display の開発・保守における注意事項、依存関係、テスト方法について記述します。
-
----
-
-## 1. 開発環境・必要ツール
-
-- Go: 1.26 以上 (`controller/go.mod` の `go 1.26.7` に準拠)
-- Node.js: v20 以上
-- uv: Python パッケージマネージャ
-- FFmpeg: 6.0 以上 (`libx264` 有効、VA-API 利用時は `h264_vaapi` 有効)
-- Intel VA-API ドライバ (`intel-media-driver` / `libva-utils` 等)
-- JDK 17 以上 / Android SDK (Android クライアントのビルド時)
-- NDI ライブラリ: cyndilib 仮想環境 (リポジトリ直下の `.venv`。`make setup-python` で作成)
-
-### Android クライアントの開発環境
-- JDK 17 以上、Android SDK (`platforms;android-34`、`build-tools;34.0.0`) が必要です。
-- SDK の場所は `android-client/local.properties` の `sdk.dir=...` (git 管理外) または環境変数 `ANDROID_HOME` で指定します。
-- ビルド: `cd android-client && ./gradlew assembleDebug` (出力: `app/build/outputs/apk/debug/app-debug.apk`)
-
-### クライアントシミュレータ
-- 実機なしで UDP ストリームを受信・デコードし、Web ブラウザで確認するツールです (`tools/simulator/client_simulator.py`)。
-- 依存 (`av` / `opencv-python` / `numpy`) はリポジトリ直下の `pyproject.toml` で管理され、`.venv` に作成されます。
-- 起動: `make run-simulator` (`make setup-python` を自動実行) → `http://localhost:9001`
+This document covers notes, dependencies and testing for developing and maintaining booth-display.
 
 ---
 
-## 2. 開発時の注意事項
+## 1. Development environment and tools
 
-### (1) Web-GUI アセットの同梱仕様
-- Vue 3 のフロントエンド (`controller/frontend/`) で生成された `dist/` アセットは、Go バックエンドの `controller/web/embed.go` を介して `embed.FS` でバイナリ内に静的コンパイルされます。
-- フロントエンドに変更を加えた場合は、`make build` または `make build-frontend` を実行して再生成してください。
-- 開発サーバー (`make dev-frontend`) 使用時は Vite の HMR (Hot Module Replacement) が利用可能です。
+- Go: 1.26 or later (matches `go 1.26.7` in `controller/go.mod`)
+- Node.js: v20 or later
+- uv: Python package manager
+- FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using VA-API)
+- Intel VA-API driver (`intel-media-driver` / `libva-utils`, etc.)
+- JDK 17 or later / Android SDK (for building the Android client)
+- NDI library: cyndilib virtual environment (`.venv` in the repository root, created by `make setup-python`)
 
-### (2) Tailwind CSS v4 のダークモード運用
-- Tailwind CSS v4 ではダークモードが標準でメディアクエリ優先となるため、クラス切り替え (`<html class="dark">`) を有効にする目的で `src/style.css` に以下を定義しています。
+### Android client environment
+- Requires JDK 17 or later and the Android SDK (`platforms;android-34`, `build-tools;34.0.0`).
+- Point to the SDK with `sdk.dir=...` in `android-client/local.properties` (not tracked by git) or with the `ANDROID_HOME` environment variable.
+- Build: `cd android-client && ./gradlew assembleDebug` (output: `app/build/outputs/apk/debug/app-debug.apk`)
+
+### Client simulator
+- A tool that receives and decodes the UDP stream without real hardware and shows it in a web browser (`tools/simulator/client_simulator.py`).
+- Its dependencies (`av` / `opencv-python` / `numpy`) are managed in `pyproject.toml` at the repository root and installed into `.venv`.
+- Start: `make run-simulator` (runs `make setup-python` automatically) → `http://localhost:9001`
+
+---
+
+## 2. Development notes
+
+### (1) How Web GUI assets are embedded
+- The `dist/` assets built from the Vue 3 frontend (`controller/frontend/`) are compiled into the binary as an `embed.FS` through `controller/web/embed.go` in the Go backend.
+- After changing the frontend, run `make build` or `make build-frontend` to regenerate them.
+- The dev server (`make dev-frontend`) supports Vite HMR (Hot Module Replacement).
+
+### (2) Dark mode with Tailwind CSS v4
+- Tailwind CSS v4 drives dark mode from the media query by default, so `src/style.css` defines the following to enable class-based switching (`<html class="dark">`):
   ```css
   @custom-variant dark (&:where(.dark, .dark *));
   ```
-- テーマ切り替え用ロジックを変更する際は、このディレクティブを削除しないよう注意してください。
+- Do not remove this directive when changing the theme-switching logic.
 
-### (3) HTTP ストリーミングのタイムアウト管理
-- Go 標準の `http.Server` には `WriteTimeout` が設定されていますが、MJPEG プレビュー (`/api/preview/mjpeg`) などの持続的接続では接続が中断されないよう `http.NewResponseController(w).SetWriteDeadline(time.Time{})` でタイムアウトを解除しています。
+### (3) Timeouts for HTTP streaming
+- The Go `http.Server` has a `WriteTimeout` set. Long-lived connections such as the MJPEG preview (`/api/preview/mjpeg`) clear it with `http.NewResponseController(w).SetWriteDeadline(time.Time{})` so they are not cut off.
 
-### (4) NDI プロセスと終了処理
-- `cyndilib` は内部で C 言語の NDI ランタイムスレッドを保持しているため、Python プロセス終了時に標準の終了フックでデッドロックする場合があります。そのため、ブリッジスクリプト (`controller/scripts/ndi_bridge.py`) では明示的な `os._exit(0)` による高速プロセス終了を行っています。
+### (4) NDI process shutdown
+- `cyndilib` holds NDI runtime threads written in C, so the Python process can deadlock in the standard exit hooks. For that reason the bridge script (`controller/scripts/ndi_bridge.py`) exits immediately with an explicit `os._exit(0)`.
 
-### (5) ハードウェアアクセラレーション (VA-API) とパーミッション
-- コントローラは起動時、`/dev/dri/renderD128` などの GPU レンダリングノードの存在を検知し、Intel VA-API によるハードウェアエンコードを自動選択します。
-- 実行ユーザに GPU デバイスへのアクセス権限限がない場合（パーミッションエラー等）や、非 Intel GPU 環境では自動的に CPU ソフトウェアエンコード (`libx264` ultrafast) にフォールバックします。
-- Linux 環境で一般ユーザとして VA-API を利用する場合、ユーザを `render` または `video` グループに所属させてください。
+### (5) Hardware acceleration (VA-API) and permissions
+- At startup the controller looks for a GPU render node such as `/dev/dri/renderD128` and, if found, picks Intel VA-API hardware encoding automatically.
+- If the user lacks access to the GPU device (e.g. a permission error), or on a non-Intel GPU, it automatically falls back to CPU software encoding (`libx264` ultrafast).
+- To use VA-API as a regular user on Linux, add the user to the `render` or `video` group:
   ```bash
   sudo usermod -aG render $USER
   ```
@@ -57,12 +57,12 @@
 
 ---
 
-## 3. テストと検証
+## 3. Testing
 
-- 単体テスト・E2Eテスト:
+- Unit and end-to-end tests:
   ```bash
   make test
   ```
-  - `controller/internal/protocol`: パケットヘッダのマーシャリング、MTU分割・結合の検証
-  - `controller/internal/pipeline`: H.264 NALUパーサーの検証
-  - `controller/internal`: コントローラ全体のUDP送出から受信パケット検証までの統合テスト
+  - `controller/internal/protocol`: packet header marshaling, and splitting/reassembly at the MTU limit
+  - `controller/internal/pipeline`: the H.264 NALU parser
+  - `controller/internal`: an integration test of the whole controller, from UDP output to checking the received packets
