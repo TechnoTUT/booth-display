@@ -524,9 +524,9 @@ func (m *CanvasMixer) fetchSource(source string, dst []byte) {
 		copy(dst, m.sourceFront)
 		m.sourceMu.RUnlock()
 	case "logo":
-		copy(dst, m.logoGen.NextFrame())
+		m.logoGen.RenderFrame(dst)
 	default:
-		copy(dst, m.testPattern.NextFrame())
+		m.testPattern.RenderFrame(dst)
 	}
 }
 

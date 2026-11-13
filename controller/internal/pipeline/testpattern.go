@@ -123,12 +123,16 @@ func (g *TestPatternGenerator) drawVerticalLine(x, yStart, yEnd int, col [4]byte
 	}
 }
 
-// NextFrame copies the base frame and renders an animated moving bar + timestamp
-func (g *TestPatternGenerator) NextFrame() []byte {
+// RenderFrame writes the next frame into frame (width*height*4 bytes): the
+// cached background plus the animated scanner bar. It draws straight into the
+// caller's buffer, so no frame is allocated per call.
+func (g *TestPatternGenerator) RenderFrame(frame []byte) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	frame := make([]byte, len(g.baseFrame))
+	if len(frame) < len(g.baseFrame) {
+		return
+	}
 	copy(frame, g.baseFrame)
 
 	// Animate a vertical scanner bar moving across the whole canvas
@@ -150,6 +154,4 @@ func (g *TestPatternGenerator) NextFrame() []byte {
 			frame[idx+3] = 0
 		}
 	}
-
-	return frame
 }

@@ -72,6 +72,7 @@ type LogoGenerator struct {
 	logoH       int
 	logoPixels  []logoPixel
 	outlineMask []bool
+	background  []byte // cached background frame, built on first render
 
 	frameIdx int
 	mu       sync.Mutex
@@ -206,22 +207,29 @@ func (g *LogoGenerator) loadLogo() {
 	}
 }
 
-func (g *LogoGenerator) NextFrame() []byte {
+// RenderFrame writes the next frame into frame (width*height*4 bytes). It
+// draws straight into the caller's buffer, so no frame is allocated per call.
+func (g *LogoGenerator) RenderFrame(frame []byte) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	frame := make([]byte, g.width*g.height*4)
-
-	// Set dark tech-navy background (BGR0: [10, 8, 5, 0])
-	for i := 0; i < len(frame); i += 4 {
-		frame[i+0] = 10
-		frame[i+1] = 8
-		frame[i+2] = 5
-		frame[i+3] = 0
+	n := g.width * g.height * 4
+	if len(frame) < n {
+		return
 	}
+	if g.background == nil {
+		// Dark tech-navy background (BGR0: [10, 8, 5, 0]), built once.
+		g.background = make([]byte, n)
+		for i := 0; i < n; i += 4 {
+			g.background[i+0] = 10
+			g.background[i+1] = 8
+			g.background[i+2] = 5
+		}
+	}
+	copy(frame, g.background)
 
 	if g.logoW == 0 || g.logoH == 0 {
-		return frame
+		return
 	}
 
 	centerY := g.height / 2
@@ -251,8 +259,6 @@ func (g *LogoGenerator) NextFrame() []byte {
 		}
 		g.renderInstance(frame, startX, top)
 	}
-
-	return frame
 }
 
 func (g *LogoGenerator) renderInstance(frame []byte, left, top int) {
