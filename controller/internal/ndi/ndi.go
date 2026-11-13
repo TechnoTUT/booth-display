@@ -11,6 +11,7 @@ package ndi
 #include <dlfcn.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <malloc.h>
 #include <stdlib.h>
 
 typedef struct {
@@ -47,14 +48,13 @@ typedef struct {
 
 static bool (*p_initialize)(void);
 static void* (*p_find_create_v2)(const ndi_find_create_t*);
-static void (*p_find_destroy)(void*);
-static bool (*p_find_wait_for_sources)(void*, uint32_t);
 static const ndi_source_t* (*p_find_get_current_sources)(void*, uint32_t*);
 static void* (*p_recv_create_v3)(const ndi_recv_create_v3_t*);
 static void (*p_recv_destroy)(void*);
+static void (*p_recv_connect)(void*, const ndi_source_t*);
+static int (*p_recv_get_no_connections)(void*);
 static int (*p_recv_capture_v2)(void*, ndi_video_frame_v2_t*, void*, void*, uint32_t);
 static void (*p_recv_free_video_v2)(void*, const ndi_video_frame_v2_t*);
-static int (*p_recv_get_no_connections)(void*);
 static const char* (*p_version)(void);
 
 // ndi_load opens libndi at path and resolves the functions used here.
@@ -65,14 +65,13 @@ static const char* ndi_load(const char* path) {
 #define SYM(var, name) if (!(*(void**)(&var) = dlsym(h, name))) return name;
 	SYM(p_initialize, "NDIlib_initialize")
 	SYM(p_find_create_v2, "NDIlib_find_create_v2")
-	SYM(p_find_destroy, "NDIlib_find_destroy")
-	SYM(p_find_wait_for_sources, "NDIlib_find_wait_for_sources")
 	SYM(p_find_get_current_sources, "NDIlib_find_get_current_sources")
 	SYM(p_recv_create_v3, "NDIlib_recv_create_v3")
 	SYM(p_recv_destroy, "NDIlib_recv_destroy")
+	SYM(p_recv_connect, "NDIlib_recv_connect")
+	SYM(p_recv_get_no_connections, "NDIlib_recv_get_no_connections")
 	SYM(p_recv_capture_v2, "NDIlib_recv_capture_v2")
 	SYM(p_recv_free_video_v2, "NDIlib_recv_free_video_v2")
-	SYM(p_recv_get_no_connections, "NDIlib_recv_get_no_connections")
 	SYM(p_version, "NDIlib_version")
 #undef SYM
 	if (!p_initialize()) return "NDIlib_initialize failed (CPU not supported?)";
@@ -83,29 +82,39 @@ static void* ndi_find_create(void) {
 	ndi_find_create_t c = { true, NULL, NULL };
 	return p_find_create_v2(&c);
 }
-static void ndi_find_destroy(void* f) { p_find_destroy(f); }
-static bool ndi_find_wait(void* f, uint32_t ms) { return p_find_wait_for_sources(f, ms); }
 static const ndi_source_t* ndi_find_sources(void* f, uint32_t* n) { return p_find_get_current_sources(f, n); }
 
-// Video only, in BGRX/BGRA, full quality, progressive frames. Audio and
-// metadata are not requested, so the SDK discards them instead of queueing.
-static void* ndi_recv_create(const char* name, const char* url, const char* recv_name) {
-	ndi_recv_create_v3_t c = { { name, url }, 0, 100, false, recv_name };
+// An unconnected receiver for video only (audio and metadata are not requested,
+// so the SDK discards them instead of queueing), full bandwidth, progressive
+// frames. Color format UYVY_BGRA: frames come as UYVY as the SDK decodes them,
+// without the SDK converting the whole picture to BGRX; only sources with alpha
+// arrive as BGRA.
+static void* ndi_recv_create(const char* recv_name) {
+	ndi_recv_create_v3_t c = { { NULL, NULL }, 1, 100, false, recv_name };
 	return p_recv_create_v3(&c);
 }
 static void ndi_recv_destroy(void* r) { p_recv_destroy(r); }
+static void ndi_recv_connect(void* r, const char* name, const char* url) {
+	ndi_source_t s = { name, url };
+	p_recv_connect(r, name ? &s : NULL);
+}
+static int ndi_recv_connections(void* r) { return p_recv_get_no_connections(r); }
+// Returns the frame type: 1 = video, 0 = none within ms, 4 = error.
 static int ndi_recv_capture_video(void* r, ndi_video_frame_v2_t* v, uint32_t ms) {
 	return p_recv_capture_v2(r, v, NULL, NULL, ms);
 }
 static void ndi_recv_free_video(void* r, ndi_video_frame_v2_t* v) { p_recv_free_video_v2(r, v); }
-static int ndi_recv_connections(void* r) { return p_recv_get_no_connections(r); }
 static const char* ndi_version(void) { return p_version(); }
+
+// Hand memory freed by libndi (glibc malloc) back to the OS.
+static void ndi_malloc_trim(void) { malloc_trim(0); }
 */
 import "C"
 
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -115,12 +124,11 @@ import (
 	"unsafe"
 )
 
+// Pixel formats of received frames (FourCC codes).
 const (
-	frameTypeVideo = 1
-	frameTypeError = 4
-
-	fourCCBGRX = 'B' | 'G'<<8 | 'R'<<16 | 'X'<<24
-	fourCCBGRA = 'B' | 'G'<<8 | 'R'<<16 | 'A'<<24
+	FourCCUYVY uint32 = 'U' | 'Y'<<8 | 'V'<<16 | 'Y'<<24
+	FourCCBGRX uint32 = 'B' | 'G'<<8 | 'R'<<16 | 'X'<<24
+	FourCCBGRA uint32 = 'B' | 'G'<<8 | 'R'<<16 | 'A'<<24
 )
 
 var (
@@ -170,25 +178,69 @@ type Source struct {
 	URL  string
 }
 
-// Discover waits until the list of NDI sources stops changing for settle, or
-// timeout elapses, and returns it. Senders are found over mDNS one by one, so
-// stopping at the first hit returns an incomplete list on busy networks.
-func Discover(timeout, settle time.Duration) ([]Source, error) {
+// The finder is created once and kept for the life of the process. Senders are
+// announced over mDNS one by one, so a finder needs a few seconds to see all of
+// them; a long-lived one already knows them when a source is looked up, and no
+// finder instances are created and torn down on every scan.
+var (
+	finderMu      sync.Mutex
+	finder        unsafe.Pointer
+	finderCreated time.Time
+)
+
+func currentSources() ([]Source, error) {
 	if err := Load(); err != nil {
 		return nil, err
 	}
-	f := C.ndi_find_create()
-	if f == nil {
-		return nil, errors.New("NDIlib_find_create_v2 failed")
+	finderMu.Lock()
+	defer finderMu.Unlock()
+	if finder == nil {
+		finder = C.ndi_find_create()
+		if finder == nil {
+			return nil, errors.New("NDIlib_find_create_v2 failed")
+		}
+		finderCreated = time.Now()
 	}
-	defer C.ndi_find_destroy(f)
+	var n C.uint32_t
+	p := C.ndi_find_sources(finder, &n)
+	if p == nil || n == 0 {
+		return nil, nil
+	}
+	list := unsafe.Slice(p, int(n))
+	out := make([]Source, 0, len(list))
+	for _, s := range list {
+		out = append(out, Source{Name: C.GoString(s.p_ndi_name), URL: C.GoString(s.p_url_address)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
 
-	end := time.Now().Add(timeout)
-	var last []Source
+func finderAge() time.Duration {
+	finderMu.Lock()
+	defer finderMu.Unlock()
+	if finder == nil {
+		return 0
+	}
+	return time.Since(finderCreated)
+}
+
+// Discover returns the NDI sources on the network. Right after the finder is
+// created it waits until the list stops changing for settle (or timeout
+// elapses), since senders show up one by one; afterwards the finder keeps the
+// list current and it is returned at once.
+func Discover(timeout, settle time.Duration) ([]Source, error) {
+	last, err := currentSources()
+	if err != nil {
+		return nil, err
+	}
+	end := time.Now().Add(timeout - finderAge())
 	lastChange := time.Now()
 	for time.Now().Before(end) {
-		C.ndi_find_wait(f, 200)
-		cur := currentSources(f)
+		time.Sleep(100 * time.Millisecond)
+		cur, err := currentSources()
+		if err != nil {
+			return nil, err
+		}
 		if !sameSources(cur, last) {
 			last, lastChange = cur, time.Now()
 		} else if len(cur) > 0 && time.Since(lastChange) >= settle {
@@ -198,61 +250,28 @@ func Discover(timeout, settle time.Duration) ([]Source, error) {
 	return last, nil
 }
 
-func currentSources(f unsafe.Pointer) []Source {
-	var n C.uint32_t
-	p := C.ndi_find_sources(f, &n)
-	if p == nil || n == 0 {
-		return nil
-	}
-	list := unsafe.Slice(p, int(n))
-	out := make([]Source, 0, len(list))
-	for _, s := range list {
-		out = append(out, Source{Name: C.GoString(s.p_ndi_name), URL: C.GoString(s.p_url_address)})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
-}
-
 func sameSources(a, b []Source) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i].Name != b[i].Name {
+		if a[i] != b[i] {
 			return false
 		}
 	}
 	return true
 }
 
-// FindSource looks for a source whose name equals name, or whose stream part
-// ("MACHINE (Stream)" -> "Stream") equals it, or that contains it, waiting up
-// to timeout. It returns early with an error when cancel is closed.
-func FindSource(name string, timeout time.Duration, cancel <-chan struct{}) (Source, error) {
-	if err := Load(); err != nil {
-		return Source{}, err
+// LookupSource returns the source matching name among those currently known,
+// without waiting: a source whose name equals name, or whose stream part
+// ("MACHINE (Stream)" -> "Stream") equals it, or that contains it.
+func LookupSource(name string) (Source, bool, error) {
+	list, err := currentSources()
+	if err != nil {
+		return Source{}, false, err
 	}
-	f := C.ndi_find_create()
-	if f == nil {
-		return Source{}, errors.New("NDIlib_find_create_v2 failed")
-	}
-	defer C.ndi_find_destroy(f)
-
-	end := time.Now().Add(timeout)
-	for {
-		if s, ok := matchSource(currentSources(f), name); ok {
-			return s, nil
-		}
-		if time.Now().After(end) {
-			return Source{}, fmt.Errorf("NDI source %q not found on the network", name)
-		}
-		select {
-		case <-cancel:
-			return Source{}, errors.New("cancelled")
-		default:
-		}
-		C.ndi_find_wait(f, 100)
-	}
+	s, ok := matchSource(list, name)
+	return s, ok, nil
 }
 
 func matchSource(list []Source, name string) (Source, bool) {
@@ -284,18 +303,50 @@ func StreamName(full string) string {
 	return ""
 }
 
-// Receiver receives video frames from one NDI source.
+// Receiver receives video from one NDI source at a time. Capture waits inside
+// the SDK for the next frame and returns the moment it arrives; if frames have
+// queued up meanwhile, the older ones are released at once and only the newest
+// is returned, so the queue stays short however the consumer is paced.
+//
+// A receiver is meant to be reused: Connect switches it to another source, and
+// Release returns it to a pool. Creating and destroying receivers repeatedly
+// costs native memory, and destroying one whose session died blocks for many
+// seconds, so that is only ever done off the caller's goroutine (Discard).
+//
+// A Receiver is not safe for concurrent use.
 type Receiver struct {
-	p    unsafe.Pointer
+	recv unsafe.Pointer
 	cur  C.ndi_video_frame_v2_t
 	have bool
 }
 
-// NewReceiver connects to src. Frames are delivered as BGRX/BGRA.
-func NewReceiver(src Source, recvName string) (*Receiver, error) {
+// Frame is a received video frame. Data points into SDK memory and is valid
+// only until the next call to Capture, Connect or Release.
+type Frame struct {
+	Width, Height int
+	Stride        int
+	FourCC        uint32 // FourCCUYVY, or FourCCBGRA/FourCCBGRX for sources with alpha
+	Data          []byte
+}
+
+// NewReceiver creates an unconnected receiver.
+func NewReceiver(recvName string) (*Receiver, error) {
 	if err := Load(); err != nil {
 		return nil, err
 	}
+	crecv := C.CString(recvName)
+	defer C.free(unsafe.Pointer(crecv))
+	recv := C.ndi_recv_create(crecv)
+	if recv == nil {
+		return nil, errors.New("NDIlib_recv_create_v3 failed")
+	}
+	return &Receiver{recv: recv}, nil
+}
+
+// Connect switches the receiver to src. Frames still queued from a previous
+// source are dropped.
+func (r *Receiver) Connect(src Source) {
+	r.release()
 	cname := C.CString(src.Name)
 	defer C.free(unsafe.Pointer(cname))
 	var curl *C.char
@@ -303,87 +354,170 @@ func NewReceiver(src Source, recvName string) (*Receiver, error) {
 		curl = C.CString(src.URL)
 		defer C.free(unsafe.Pointer(curl))
 	}
-	crecv := C.CString(recvName)
-	defer C.free(unsafe.Pointer(crecv))
-
-	p := C.ndi_recv_create(cname, curl, crecv)
-	if p == nil {
-		return nil, errors.New("NDIlib_recv_create_v3 failed")
-	}
-	return &Receiver{p: p}, nil
+	C.ndi_recv_connect(r.recv, cname, curl)
+	r.drain()
 }
 
-// Frame is a received video frame. Data points into SDK memory and is valid
-// only until the next call to Capture or Close.
-type Frame struct {
-	Width, Height int
-	Stride        int
-	Data          []byte
-	// Dropped is how many older queued frames Capture skipped to return this one.
-	Dropped int
-}
-
-// Capture waits up to timeout for a video frame. If more frames are already
-// queued when one arrives, the older ones are released and the newest is
-// returned, so a slow consumer never falls behind the source. ok is false when
-// no frame arrived in time.
-func (r *Receiver) Capture(timeout time.Duration) (f Frame, ok bool, err error) {
+// disconnect drops the connection and any queued frames. It is quick on a
+// live session but can block for many seconds on one that died, so only
+// Release calls it, in the background, and only for receivers that were
+// delivering frames.
+func (r *Receiver) disconnect() {
 	r.release()
+	C.ndi_recv_connect(r.recv, nil, nil)
+	r.drain()
+}
 
+func (r *Receiver) drain() {
 	var v C.ndi_video_frame_v2_t
-	t := C.ndi_recv_capture_video(r.p, &v, C.uint32_t(timeout/time.Millisecond))
-	switch t {
+	for C.ndi_recv_capture_video(r.recv, &v, 0) == frameTypeVideo {
+		C.ndi_recv_free_video(r.recv, &v)
+	}
+}
+
+const (
+	frameTypeVideo = 1
+	frameTypeError = 4
+)
+
+// ErrConnection is returned by Capture when the SDK reports a connection error.
+var ErrConnection = errors.New("NDI receiver reported a connection error")
+
+// Capture waits up to timeout for a video frame and returns the newest one
+// available. ok is false when none arrived in time. Dropped is how many older
+// queued frames were skipped.
+func (r *Receiver) Capture(timeout time.Duration) (f Frame, dropped int, ok bool, err error) {
+	r.release()
+	var v C.ndi_video_frame_v2_t
+	switch C.ndi_recv_capture_video(r.recv, &v, C.uint32_t(timeout/time.Millisecond)) {
 	case frameTypeVideo:
 	case frameTypeError:
-		return Frame{}, false, errors.New("NDI receiver reported a connection error")
+		return Frame{}, 0, false, ErrConnection
 	default:
-		return Frame{}, false, nil
+		return Frame{}, 0, false, nil
 	}
-	dropped := 0
 	for {
 		var next C.ndi_video_frame_v2_t
-		if C.ndi_recv_capture_video(r.p, &next, 0) != frameTypeVideo {
+		if C.ndi_recv_capture_video(r.recv, &next, 0) != frameTypeVideo {
 			break
 		}
-		C.ndi_recv_free_video(r.p, &v)
+		C.ndi_recv_free_video(r.recv, &v)
 		v = next
 		dropped++
 	}
 	r.cur, r.have = v, true
+	f, ok = frameOf(&r.cur)
+	return f, dropped, ok, nil
+}
 
-	if v.FourCC != fourCCBGRX && v.FourCC != fourCCBGRA {
-		return Frame{}, false, fmt.Errorf("unexpected NDI pixel format %08x", uint32(v.FourCC))
+// frameOf describes a received frame, or returns false for one this package
+// does not handle (unknown pixel format, inconsistent stride).
+func frameOf(v *C.ndi_video_frame_v2_t) (Frame, bool) {
+	if v.p_data == nil || v.xres <= 0 || v.yres <= 0 {
+		return Frame{}, false
 	}
-	if v.p_data == nil || v.xres <= 0 || v.yres <= 0 || v.line_stride_in_bytes < v.xres*4 {
-		return Frame{}, false, nil
+	fourcc := uint32(v.FourCC)
+	minStride := int(v.xres) * 4
+	if fourcc == FourCCUYVY {
+		minStride = (int(v.xres) + 1) / 2 * 4
+	} else if fourcc != FourCCBGRX && fourcc != FourCCBGRA {
+		return Frame{}, false
 	}
-	size := int(v.line_stride_in_bytes) * int(v.yres)
+	if int(v.line_stride_in_bytes) < minStride {
+		return Frame{}, false
+	}
 	return Frame{
-		Width:   int(v.xres),
-		Height:  int(v.yres),
-		Stride:  int(v.line_stride_in_bytes),
-		Data:    unsafe.Slice((*byte)(unsafe.Pointer(v.p_data)), size),
-		Dropped: dropped,
-	}, true, nil
+		Width:  int(v.xres),
+		Height: int(v.yres),
+		Stride: int(v.line_stride_in_bytes),
+		FourCC: fourcc,
+		Data:   unsafe.Slice((*byte)(unsafe.Pointer(v.p_data)), int(v.line_stride_in_bytes)*int(v.yres)),
+	}, true
 }
 
 func (r *Receiver) release() {
 	if r.have {
-		C.ndi_recv_free_video(r.p, &r.cur)
+		C.ndi_recv_free_video(r.recv, &r.cur)
 		r.have = false
 	}
 }
 
-// Connections returns the number of active connections to the source.
-func (r *Receiver) Connections() int { return int(C.ndi_recv_connections(r.p)) }
+// Connections returns the number of active connections to the source. A dead
+// session can keep reporting a connection for minutes after a network outage.
+func (r *Receiver) Connections() int { return int(C.ndi_recv_connections(r.recv)) }
 
-// Close releases the current frame and destroys the receiver. It must not be
-// called concurrently with Capture.
-func (r *Receiver) Close() {
-	if r.p == nil {
-		return
-	}
+func (r *Receiver) destroy() {
 	r.release()
-	C.ndi_recv_destroy(r.p)
-	r.p = nil
+	C.ndi_recv_destroy(r.recv)
+	r.recv = nil
 }
+
+// Receivers no longer in use are handed back here. One disconnected receiver
+// is kept for reuse; the rest are destroyed in the background.
+var (
+	poolMu     sync.Mutex
+	idle       *Receiver
+	discarding int // receivers being destroyed right now
+)
+
+// AcquireReceiver returns an idle receiver from the pool, or a new one.
+func AcquireReceiver(recvName string) (*Receiver, error) {
+	poolMu.Lock()
+	r := idle
+	idle = nil
+	poolMu.Unlock()
+	if r != nil {
+		return r, nil
+	}
+	return NewReceiver(recvName)
+}
+
+// Release disconnects a receiver that was delivering frames (cheap on a live
+// session) in the background and keeps it for reuse. Use Discard instead for a
+// receiver whose session stalled.
+func Release(r *Receiver) {
+	go func() {
+		r.disconnect()
+		poolMu.Lock()
+		if idle == nil {
+			idle, r = r, nil
+		}
+		poolMu.Unlock()
+		if r != nil {
+			destroyAndTrim(r)
+		}
+	}()
+}
+
+// Discard destroys a receiver in the background. Tearing down a session that
+// died (no frames although NDI still reports a connection, or a sender that
+// went away) blocks inside the SDK for 10 s or more, so it must never happen
+// on a goroutine that anything waits for.
+func Discard(r *Receiver) {
+	poolMu.Lock()
+	discarding++
+	n := discarding
+	poolMu.Unlock()
+	if n > 4 {
+		log.Printf("[NDI] %d stalled receivers are still being torn down", n)
+	}
+	go func() {
+		destroyAndTrim(r)
+		poolMu.Lock()
+		discarding--
+		poolMu.Unlock()
+	}()
+}
+
+func destroyAndTrim(r *Receiver) {
+	start := time.Now()
+	r.destroy()
+	TrimMemory()
+	if d := time.Since(start); d > time.Second {
+		log.Printf("[NDI] Released a receiver in %.1fs", d.Seconds())
+	}
+}
+
+// TrimMemory returns heap memory that libndi freed (frame buffers of destroyed
+// receivers) to the OS, so the process does not keep it resident.
+func TrimMemory() { C.ndi_malloc_trim() }

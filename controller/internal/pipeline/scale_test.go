@@ -3,6 +3,7 @@ package pipeline
 import (
 	"encoding/binary"
 	"testing"
+	"unsafe"
 )
 
 func TestCenterCropRect(t *testing.T) {
@@ -115,5 +116,115 @@ func BenchmarkScaleNDI4KToCanvas(b *testing.B) {
 	b.SetBytes(int64(len(dst)))
 	for b.Loop() {
 		s.Scale(dst, src, 3840*4)
+	}
+}
+
+// makeUYVY builds a UYVY frame whose macropixel m of row y is f(m, y).
+func makeUYVY(w, h, stride int, f func(m, y int) uint32) []byte {
+	b := make([]byte, stride*h)
+	for y := range h {
+		for m := range (w + 1) / 2 {
+			binary.LittleEndian.PutUint32(b[y*stride+m*4:], f(m, y))
+		}
+	}
+	return b
+}
+
+func uyvy(u, y0, v, y1 uint32) uint32 { return u | y0<<8 | v<<16 | y1<<24 }
+
+func TestYUVConvertKnownColors(t *testing.T) {
+	near := func(got, want uint32) bool {
+		for s := 0; s < 32; s += 8 {
+			d := int(got>>s&0xFF) - int(want>>s&0xFF)
+			if d < -2 || d > 2 {
+				return false
+			}
+		}
+		return true
+	}
+	t709 := newYUVTables(false)
+	t601 := newYUVTables(true)
+	cases := []struct {
+		name string
+		tab  *yuvTables
+		mp   uint32
+		want uint32 // BGRX
+	}{
+		{"white", t709, uyvy(128, 235, 128, 235), 0xFFFFFFFF},
+		{"black", t709, uyvy(128, 16, 128, 16), 0xFF000000},
+		{"709 red", t709, uyvy(102, 63, 240, 63), 0xFFFF0000},
+		{"709 green", t709, uyvy(42, 173, 26, 173), 0xFF00FF00},
+		{"709 blue", t709, uyvy(240, 32, 118, 32), 0xFF0000FF},
+		{"601 red", t601, uyvy(90, 81, 240, 81), 0xFFFF0000},
+	}
+	for _, c := range cases {
+		out := make([]uint32, 2)
+		c.tab.convertRow(out, []uint32{c.mp}, 0)
+		for i, got := range out {
+			if !near(got, c.want) {
+				t.Errorf("%s pixel %d = %08x, want %08x", c.name, i, got, c.want)
+			}
+		}
+	}
+}
+
+// TestUYVYScalerMatchesBGRX checks that converting only the cropped part of
+// each row (here starting on an odd pixel) gives exactly what converting the
+// whole frame first and scaling it as BGRX gives.
+func TestUYVYScalerMatchesBGRX(t *testing.T) {
+	const srcW, srcH, dstW, dstH = 1003, 120, 300, 300 // crop 120x120 at x=441
+	stride := (srcW+1)/2*4 + 8
+	src := makeUYVY(srcW, srcH, stride, func(m, y int) uint32 {
+		h := uint32(m*7919+y*104729) * 2654435761
+		return uyvy(h&0xFF, 16+(h>>8&0xFF)%220, h>>16&0xFF, 16+(h>>24)%220)
+	})
+	us := newUYVYScaler(srcW, srcH, dstW, dstH, true)
+	if us.cropX%2 != 1 {
+		t.Fatalf("test wants an odd crop start, got %d", us.cropX)
+	}
+
+	// Reference: whole rows converted to BGRX, then the BGRX scaler.
+	tab := newYUVTables(true)
+	ref := make([]byte, srcW*4*srcH)
+	for y := range srcH {
+		row := unsafe.Slice((*uint32)(unsafe.Pointer(&src[y*stride])), (srcW+1)/2)
+		out := unsafe.Slice((*uint32)(unsafe.Pointer(&ref[y*srcW*4])), srcW)
+		tab.convertRow(out, row, 0)
+	}
+	bs := newBGRXScaler(srcW, srcH, dstW, dstH, true)
+
+	got := make([]byte, dstW*dstH*4)
+	want := make([]byte, dstW*dstH*4)
+	us.Scale(got, src, stride)
+	bs.Scale(want, ref, srcW*4)
+	for y := range dstH {
+		for x := range dstW {
+			if g, w := pixel(got, dstW, x, y), pixel(want, dstW, x, y); g != w {
+				t.Fatalf("pixel %d,%d = %08x, want %08x", x, y, g, w)
+			}
+		}
+	}
+}
+
+// BenchmarkScaleNDIUYVY1080pToCanvas is the NDI receive path: a UYVY 1080p
+// frame, converted (cropped rows only) and scaled onto the 5760x540 canvas.
+func BenchmarkScaleNDIUYVY1080pToCanvas(b *testing.B) {
+	src := makeUYVY(1920, 1080, 1920*2, func(m, y int) uint32 { return uint32(m*y) * 2654435761 })
+	s := newUYVYScaler(1920, 1080, 5760, 540, true)
+	dst := make([]byte, 5760*540*4)
+	b.SetBytes(int64(len(dst)))
+	for b.Loop() {
+		s.Scale(dst, src, 1920*2)
+	}
+}
+
+func BenchmarkScaleNDIUYVY1080pToCanvasSingleCore(b *testing.B) {
+	src := makeUYVY(1920, 1080, 1920*2, func(m, y int) uint32 { return uint32(m*y) * 2654435761 })
+	s := newUYVYScaler(1920, 1080, 5760, 540, true)
+	s.workers = 1
+	dst := make([]byte, 5760*540*4)
+	b.SetBytes(int64(len(dst)))
+	for b.Loop() {
+		s.Scale(dst, src, 1920*2)
 	}
 }

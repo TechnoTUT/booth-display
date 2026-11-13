@@ -91,11 +91,13 @@ flowchart TB
   - Two-way communication with clients and the Web GUI, with telemetry sent every second.
 
 ### (3) NDI input
-- `controller/internal/ndi`: calls the NDI SDK (`libndi`) through cgo. The library is loaded with `dlopen` at runtime (see the README for the search order), so the controller builds and runs without it; only NDI input is unavailable then.
-  - Discovery waits for the source list to settle, because senders are found over mDNS one by one.
-  - The receiver asks for video only (BGRX, full bandwidth, progressive). Audio and metadata are not requested, so the SDK discards them instead of queueing them.
-  - When several frames are queued, only the newest is used.
-- `NDIDistributor` (`controller/internal/pipeline/ndi.go`) forwards each frame the moment it arrives: it center-crops and bilinearly scales it onto the canvas (`scale.go`, all cores, no SIMD dependency) and signals the mixer. A source faster than the canvas rate is thinned to about the canvas rate.
+- `controller/internal/ndi`: calls the NDI SDK (`libndi`, installed with `make setup-ndi`) through cgo. The library is loaded with `dlopen` at runtime (see the README for the search order), so the controller builds and runs without it; only NDI input is unavailable then. The receiver handling follows [moip-toolkit](https://github.com/TechnoTUT/moip-toolkit):
+  - One finder lives for the whole process, so it already knows the senders when a source is looked up. Only right after it is created does discovery wait for the list to settle.
+  - The receiver asks for video only (UYVY, full bandwidth, progressive). Audio and metadata are not requested, so the SDK discards them instead of queueing them. UYVY is what the SDK decodes to, so it does not convert whole frames to BGRX (sources with alpha arrive as BGRA).
+  - Capture waits inside the SDK for the next frame and returns the moment it arrives; frames that queued up meanwhile are released at once and only the newest is used. (moip-toolkit polls a frame synchronizer instead; measured here, waiting for the frame kept p90 latency ~3 ms lower.)
+  - Receivers are reused: switching sources reconnects a pooled receiver instead of creating a new one. A receiver whose session died is never torn down on the receive goroutine (that blocks inside the SDK for 10 s or more); it is destroyed in the background, followed by `malloc_trim`.
+- `NDIDistributor` (`controller/internal/pipeline/ndi.go`) forwards each frame the moment it arrives: it converts only the cropped rows from UYVY, center-crops and bilinearly scales them onto the canvas (`scale.go`, all cores, no SIMD dependency) and signals the mixer. A source faster than the canvas rate is thinned to about the canvas rate.
+  - It recovers by itself: a missing source is looked for until it appears, a source silent for 2 s (doubling up to 30 s) while NDI still reports a connection gets a fresh receiver, and a sender that comes back after dropping off the source list (or under another address) is connected to at once. The last frame stays on the canvas meanwhile.
 - The mixer renders on NDI frame arrival; its ticker only paces generator sources and stands in when NDI frames stop, so a 29.97 fps source is not held back by a 30 Hz clock.
 
 ---

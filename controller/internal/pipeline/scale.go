@@ -17,6 +17,12 @@ import (
 //
 // Weights are fixed-point (0..256) and every channel, including X, is blended
 // with SWAR arithmetic: one multiply covers two channels per 32-bit pixel.
+//
+// A scaler made by newUYVYScaler takes UYVY 4:2:2 input instead (as NDI
+// delivers it) and converts only the cropped part of the source rows it reads
+// to BGRX, just before the horizontal pass. For a 1080p source on the default
+// canvas that is 180 of 1080 rows, far less work than having the NDI SDK
+// convert every frame to BGRX in full.
 type bgrxScaler struct {
 	srcW, srcH int
 	cropX      int
@@ -32,12 +38,26 @@ type bgrxScaler struct {
 
 	workers int
 	caches  []rowCache
+
+	uyvy *yuvTables // non-nil for UYVY input
 }
 
 // rowCache holds the two most recent horizontally resampled source rows of one worker.
 type rowCache struct {
-	row [2][]uint32
-	tag [2]int // source row index held in row[i], -1 if none
+	row  [2][]uint32
+	tag  [2]int   // source row index held in row[i], -1 if none
+	conv []uint32 // UYVY input: the cropped source row converted to BGRX
+}
+
+// newUYVYScaler is newBGRXScaler for UYVY input. Sources with fewer than 720
+// lines use BT.601 colors, others BT.709, as NDI does.
+func newUYVYScaler(srcW, srcH, dstW, dstH int, centerCrop bool) *bgrxScaler {
+	s := newBGRXScaler(srcW, srcH, dstW, dstH, centerCrop)
+	s.uyvy = newYUVTables(srcH < 720)
+	for i := range s.caches {
+		s.caches[i].conv = make([]uint32, s.cropW)
+	}
+	return s
 }
 
 // newBGRXScaler prepares a scaler from a srcW x srcH frame to dstW x dstH.
@@ -132,14 +152,18 @@ func blend64(a, b, w uint64) uint64 {
 // rows of srcStride bytes. Both must be 4-byte aligned, which Go heap slices
 // and NDI frame buffers are.
 func (s *bgrxScaler) Scale(dst []byte, src []byte, srcStride int) {
-	if len(dst) < s.dstW*s.dstH*4 || len(src) < (s.srcH-1)*srcStride+s.srcW*4 || srcStride%4 != 0 {
+	rowBytes := s.srcW * 4
+	if s.uyvy != nil {
+		rowBytes = (s.srcW + 1) / 2 * 4
+	}
+	if len(dst) < s.dstW*s.dstH*4 || len(src) < (s.srcH-1)*srcStride+rowBytes || srcStride%4 != 0 {
 		return
 	}
 	d := unsafe.Slice((*uint32)(unsafe.Pointer(&dst[0])), s.dstW*s.dstH)
 	src32 := unsafe.Slice((*uint32)(unsafe.Pointer(&src[0])), len(src)/4)
 	stride := srcStride / 4
 
-	if s.cropW == s.dstW && s.cropH == s.dstH {
+	if s.cropW == s.dstW && s.cropH == s.dstH && s.uyvy == nil {
 		for y := range s.dstH {
 			row := (s.cropY+y)*stride + s.cropX
 			copy(d[y*s.dstW:(y+1)*s.dstW], src32[row:row+s.dstW])
@@ -181,7 +205,13 @@ func (s *bgrxScaler) hrow(src []uint32, stride int, c *rowCache, sy int) []uint3
 	c.tag[slot] = sy
 	out := c.row[slot]
 
-	r := src[sy*stride+s.cropX : sy*stride+s.cropX+s.cropW]
+	var r []uint32
+	if s.uyvy != nil {
+		r = c.conv
+		s.uyvy.convertRow(r, src[sy*stride:sy*stride+(s.srcW+1)/2], s.cropX)
+	} else {
+		r = src[sy*stride+s.cropX : sy*stride+s.cropX+s.cropW]
+	}
 	if len(r) < 2 {
 		for x := range out {
 			out[x] = r[0]
@@ -223,6 +253,105 @@ func (s *bgrxScaler) scaleRows(d, src []uint32, stride int, c *rowCache, y0, y1 
 		if len(out)%2 == 1 {
 			last := len(out) - 1
 			out[last] = blend32(a[last], b[last], wy)
+		}
+	}
+}
+
+// yuvTables converts limited-range Y'CbCr to BGRX with 16-bit fixed-point
+// lookup tables, so each pixel costs a few table loads and adds and no branches.
+type yuvTables struct {
+	y  [256]int32 // (Y-16) * 255/219, scaled by 2^16, plus rounding
+	rv [256]int32 // Cr contribution to R
+	gu [256]int32 // Cb contribution to G (negative)
+	gv [256]int32 // Cr contribution to G (negative)
+	bu [256]int32 // Cb contribution to B
+	// clamp maps an integer result v (-256 <= v < 768; actual results stay
+	// within about -250..510) at index v+256 to 0..255.
+	clamp [1024]uint32
+}
+
+func newYUVTables(bt601 bool) *yuvTables {
+	// Kr/Kb of the color matrix; chroma scaled by 255/224 for limited range.
+	kr, kb := 0.2126, 0.0722
+	if bt601 {
+		kr, kb = 0.299, 0.114
+	}
+	kg := 1 - kr - kb
+	const yScale, cScale = 255.0 / 219.0, 255.0 / 224.0
+	rv := 2 * (1 - kr) * cScale
+	bu := 2 * (1 - kb) * cScale
+	gu := 2 * (1 - kb) * kb / kg * cScale
+	gv := 2 * (1 - kr) * kr / kg * cScale
+
+	t := &yuvTables{}
+	fix := func(f float64) int32 {
+		if f < 0 {
+			return int32(f*65536 - 0.5)
+		}
+		return int32(f*65536 + 0.5)
+	}
+	for i := range 256 {
+		c := float64(i - 128)
+		t.y[i] = fix(float64(i-16)*yScale) + 1<<15 + 256<<16 // +256: clamp table offset
+		t.rv[i] = fix(rv * c)
+		t.gu[i] = fix(-gu * c)
+		t.gv[i] = fix(-gv * c)
+		t.bu[i] = fix(bu * c)
+	}
+	for i := range t.clamp {
+		t.clamp[i] = uint32(min(max(i-256, 0), 255))
+	}
+	return t
+}
+
+// pixel returns the BGRX pixel for luma y and the chroma terms r, g, b.
+func (t *yuvTables) pixel(y uint8, r, g, b int32) uint32 {
+	yy := t.y[y]
+	return t.clamp[uint32(yy+b)>>16&1023] |
+		t.clamp[uint32(yy+g)>>16&1023]<<8 |
+		t.clamp[uint32(yy+r)>>16&1023]<<16 | 0xFF000000
+}
+
+// convertRow converts len(out) pixels of a UYVY row, starting at pixel x0, to
+// BGRX. row holds the row's macropixels (U Y0 V Y1, little-endian uint32).
+// Chroma is co-sited with even pixels; odd pixels use the average of the two
+// neighboring chroma samples.
+func (t *yuvTables) convertRow(out, row []uint32, x0 int) {
+	n := len(out)
+	if n == 0 || len(row) == 0 {
+		return
+	}
+	last := len(row) - 1
+	m := x0 >> 1
+	i := 0
+	if x0&1 == 1 { // starts on an odd pixel: second half of macropixel m
+		mp, next := row[m], row[min(m+1, last)]
+		u := uint8((mp&0xFF + next&0xFF + 1) >> 1)
+		v := uint8((mp>>16&0xFF + next>>16&0xFF + 1) >> 1)
+		out[0] = t.pixel(uint8(mp>>24), t.rv[v], t.gu[u]+t.gv[v], t.bu[u])
+		i, m = 1, m+1
+	}
+	// Pairs whose next macropixel exists; the last pair is handled after.
+	pairs := min((n-i)/2, last-m)
+	if pairs > 0 {
+		src := row[m : m+pairs+1]
+		dst := out[i : i+2*pairs]
+		for k := range pairs {
+			mp, next := src[k], src[k+1]
+			u0, v0 := uint8(mp), uint8(mp>>16)
+			u1 := uint8((uint32(u0) + next&0xFF + 1) >> 1)
+			v1 := uint8((uint32(v0) + next>>16&0xFF + 1) >> 1)
+			dst[2*k] = t.pixel(uint8(mp>>8), t.rv[v0], t.gu[u0]+t.gv[v0], t.bu[u0])
+			dst[2*k+1] = t.pixel(uint8(mp>>24), t.rv[v1], t.gu[u1]+t.gv[v1], t.bu[u1])
+		}
+		i, m = i+2*pairs, m+pairs
+	}
+	for ; i < n; i, m = i+2, m+1 { // at most one pair at the row end
+		mp := row[m]
+		u, v := uint8(mp), uint8(mp>>16)
+		out[i] = t.pixel(uint8(mp>>8), t.rv[v], t.gu[u]+t.gv[v], t.bu[u])
+		if i+1 < n {
+			out[i+1] = t.pixel(uint8(mp>>24), t.rv[v], t.gu[u]+t.gv[v], t.bu[u])
 		}
 	}
 }
