@@ -12,15 +12,47 @@ See [docs/](docs/) for the architecture and protocol details:
 ## Requirements
 
 - OS: Linux (Debian 12+, Ubuntu 22.04+, AlmaLinux / RHEL 9+, Fedora 39+, etc.)
-- Go: 1.26 or later
+- Go: 1.26 or later, with a C compiler (`gcc`) for cgo (the NDI input calls libndi through cgo)
 - Node.js: 20 or later
 - FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using an Intel GPU)
-- Intel VA-API driver (recommended: integrated graphics on 6th-gen Skylake or newer Intel CPUs, for fast encoding at low CPU load)
-- uv: Python package manager (needed for NDI input and the client simulator)
+- Intel VA-API driver for fast encoding at low CPU load: `intel-media-driver` (iHD) on 5th-gen Broadwell and newer, or the legacy `i965` driver on 3rd/4th-gen Ivy Bridge / Haswell (the reference target is a Core i5-3470)
+- NDI runtime (`libndi.so.6`) for NDI input: installed from the official NDI SDK for Linux with `make setup-ndi` (see [NDI runtime](#ndi-runtime))
+- uv: Python package manager (only for the client simulator)
 - To build the Android client:
   - JDK 17 or later
   - Android SDK (`platforms;android-34`, `build-tools;34.0.0`)
   - Point to the SDK with `sdk.dir=...` in `android-client/local.properties` or with the `ANDROID_HOME` environment variable
+
+---
+
+## Setup
+
+On a new machine, in this order (each step is explained in its own section below):
+
+```bash
+# 1. FFmpeg and the VA-API driver for your GPU
+#    → see "FFmpeg and hardware acceleration (VA-API) setup"
+
+# 2. NDI runtime: downloads the official NDI SDK for Linux, shows its license,
+#    installs libndi.so.6 to /usr/local/lib and registers it with the dynamic linker (sudo)
+make setup-ndi
+
+# 3. Frontend dependencies (once, and after package-lock.json changes)
+npm --prefix controller/frontend ci
+
+# 4. Build and run
+make build
+./controller/bin/display-controller -config config.yaml
+```
+
+Then open the Web GUI at `http://<host>:8080/` (the port is `server.http_port` in `config.yaml`).
+
+Optional, for development:
+
+- `make run-simulator`: client simulator, a stand-in for the displays (needs `uv`; its Python dependencies are installed automatically)
+- `make ndi-stamp-sender`: NDI test sender for measuring NDI latency (see [docs/development.md](docs/development.md))
+
+Python and a `.venv` are not needed to run the controller.
 
 ---
 
@@ -46,6 +78,22 @@ sudo apt update
 sudo apt install -y ffmpeg vainfo intel-media-va-driver-non-free
 # (for the open-source driver, use intel-media-driver or intel-media-va-driver instead)
 ```
+
+#### Ivy Bridge / Haswell (e.g. Core i5-3470)
+
+The iHD driver does not support these GPUs. Install the legacy i965 driver instead and select it:
+
+```bash
+# AlmaLinux / RHEL / Fedora (RPM Fusion)
+sudo dnf install -y libva-intel-driver
+# Ubuntu / Debian
+sudo apt install -y i965-va-driver
+
+# Only needed when both drivers are installed
+export LIBVA_DRIVER_NAME=i965
+```
+
+`vainfo` should then list `VAProfileH264ConstrainedBaseline : VAEntrypointEncSlice`. The i965 driver prints a `Not using hybrid_drv_video.so` notice; it is harmless. If VA-API cannot start, the controller falls back to libx264, which still keeps up with three 1920x540 outputs on a Core i5-3470 class CPU.
 
 ### 2. Verify
 
@@ -131,19 +179,33 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 > The release build (`./gradlew assembleRelease`) has no signing config, so it produces `app-release-unsigned.apk`, which cannot be installed until you sign it.
 
-## Python environment (NDI bridge / simulator)
+## NDI runtime
 
-The dependencies for NDI input (`cyndilib`) and the client simulator (`av`) are managed in `pyproject.toml` at the repository root and installed into `.venv`.
+The controller receives NDI directly through the NDI SDK library (`libndi`), loaded at runtime. Install it once per machine from the official NDI SDK for Linux:
 
 ```bash
-make setup-python   # uv sync
+make setup-ndi   # scripts/install-ndi-sdk.sh: downloads the SDK, shows its license, installs libndi.so.6 to /usr/local/lib (sudo)
 ```
 
-Start the controller from the repository root (it uses `uv run --project .` to find `.venv`).
+The script registers `/usr/local/lib` with the dynamic linker (`/etc/ld.so.conf.d/ndi-sdk.conf`) when it is not searched already, as on Fedora/RHEL. `PREFIX=/opt/ndi make setup-ndi` installs elsewhere. On further machines, `NDI_ACCEPT_LICENSE=yes make setup-ndi` skips the license prompt once you have accepted it.
+
+The controller looks for the library in this order:
+
+1. `$NDI_RUNTIME_DIR_V6/libndi.so.6` (the NDI SDK's environment variable)
+2. `libndi.so.6` / `libndi.so` on the system library path
+3. `/usr/local/lib/libndi.so.6`
+
+Without it, everything except NDI input works, and the GUI shows why NDI is unavailable.
+
+NDI finds senders over mDNS (UDP 5353). If a firewall blocks it, list sender addresses in the NDI configuration file (`~/.ndi/ndi-config.v1.json`, or the directory named by `NDI_CONFIG_DIR`):
+
+```json
+{"ndi": {"networks": {"ips": "192.168.1.20,192.168.1.21"}}}
+```
 
 ## Client simulator (tools/simulator/)
 
-Lets you check the stream without real hardware: it decodes the H.264 stream received over UDP and shows it in a web browser. The Python environment is created automatically as `.venv` by `uv` from the root `pyproject.toml` (`make setup-python`).
+Lets you check the stream without real hardware: it decodes the H.264 stream received over UDP and shows it in a web browser. Its Python dependencies are declared inside the script (inline script metadata), and `uv run` installs them into a cached environment on first run.
 
 ```bash
 # Start the simulator for display-1 (UDP :8554), then open http://localhost:9001

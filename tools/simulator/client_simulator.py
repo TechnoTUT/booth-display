@@ -1,4 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "av",
+#     "numpy",
+#     "opencv-python",
+# ]
+# ///
 """
 client_simulator.py
 Web-based Android Client Simulator for booth-display (LD290EJS-FPN1 / 1920x540).
@@ -9,8 +17,8 @@ Functions:
   3. Decodes H.264 stream using hardware/fast libavcodec (PyAV).
   4. Encodes screen as 1920x540 MJPEG and serves a standalone Web UI at http://<ip>:<web_port>/.
 
-Run via uv:
-  uv run --directory <uv-project-dir> python tools/simulator/client_simulator.py --port 8554 --web-port 9001 --id "display-1"
+Run via uv (dependencies are declared above and installed by uv on first run):
+  uv run tools/simulator/client_simulator.py --port 8554 --web-port 9001 --id "display-1"
 """
 from __future__ import annotations
 

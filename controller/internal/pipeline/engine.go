@@ -13,7 +13,7 @@ type PipelineStatus struct {
 	IsRunning  bool   `json:"is_running"`
 	ActiveMode string `json:"active_mode"`
 	VideoFile  string `json:"video_file"`
-	// Error is set when the encoder or the NDI bridge exited unexpectedly while running.
+	// Error is set when the encoder or the NDI input stopped unexpectedly while running.
 	Error string `json:"error,omitempty"`
 }
 
