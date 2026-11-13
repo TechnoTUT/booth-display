@@ -41,7 +41,9 @@ tar -xzf "$INSTALLER_NAME.tar.gz"
 # The installer pages through the license and extracts "NDI SDK for Linux/"
 # into the current directory once it is accepted.
 if [[ "${NDI_ACCEPT_LICENSE:-}" == "yes" ]]; then
-    yes | PAGER=cat sh "$INSTALLER_NAME.sh" >/dev/null
+    # yes dies of SIGPIPE (status 141) once the installer stops reading;
+    # under pipefail that would abort the script before libndi is copied.
+    { yes || true; } | PAGER=cat sh "$INSTALLER_NAME.sh" >/dev/null
 else
     PAGER="${PAGER:-less}" sh "$INSTALLER_NAME.sh"
 fi
