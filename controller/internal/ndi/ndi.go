@@ -131,28 +131,14 @@ var (
 
 // libraryCandidates lists where libndi is looked for, in order: the NDI runtime
 // directory named by the SDK's environment variable, the system library path,
-// and the copy bundled with the Python cyndilib package in the repository's
-// .venv (created by "make setup-python").
+// and /usr/local/lib, where "make setup-ndi" installs it (in case the dynamic
+// linker was not told about that directory).
 func libraryCandidates() []string {
 	var c []string
 	if dir := os.Getenv("NDI_RUNTIME_DIR_V6"); dir != "" {
 		c = append(c, filepath.Join(dir, "libndi.so.6"), filepath.Join(dir, "libndi.so"))
 	}
-	c = append(c, "libndi.so.6", "libndi.so")
-	// The controller is normally started from the repository root; also look in
-	// parent directories so tests and other working directories find it too.
-	dir, _ := os.Getwd()
-	for range 4 {
-		m, _ := filepath.Glob(filepath.Join(dir, ".venv/lib/python*/site-packages/cyndilib/wrapper/bin/x86_64-linux-gnu/libndi.so*"))
-		sort.Strings(m)
-		c = append(c, m...)
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return c
+	return append(c, "libndi.so.6", "libndi.so", "/usr/local/lib/libndi.so.6")
 }
 
 // Load loads and initializes libndi once. Every other function calls it.
@@ -169,7 +155,7 @@ func Load() error {
 			}
 			errs = append(errs, fmt.Sprintf("%s: %s", path, C.GoString(msg)))
 		}
-		loadErr = fmt.Errorf("NDI runtime (libndi) not found; install the NDI SDK/runtime, set NDI_RUNTIME_DIR_V6, or run \"make setup-python\" [%s]",
+		loadErr = fmt.Errorf("NDI runtime (libndi) not found; run \"make setup-ndi\" or set NDI_RUNTIME_DIR_V6 to the directory holding libndi.so.6 [%s]",
 			strings.Join(errs, "; "))
 	})
 	return loadErr

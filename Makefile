@@ -1,4 +1,4 @@
-.PHONY: setup-python all build build-frontend build-backend test run clean dev-frontend
+.PHONY: setup-ndi setup-python all build build-frontend build-backend test run clean dev-frontend
 
 # デフォルトターゲット: Vue.js と Go をまとめてビルド
 all: build
@@ -28,7 +28,11 @@ run: build
 dev-frontend:
 	npm --prefix controller/frontend run dev
 
-# Python 環境 (.venv) をリポジトリ直下に作成 (シミュレータ用 / cyndilib 同梱の NDI ランタイム libndi)
+# NDI ランタイム (libndi.so.6) を公式 NDI SDK からシステムに導入 (/usr/local/lib, sudo を使用)
+setup-ndi:
+	./scripts/install-ndi-sdk.sh
+
+# Python 環境 (.venv) をリポジトリ直下に作成 (シミュレータ用)
 setup-python:
 	uv sync
 

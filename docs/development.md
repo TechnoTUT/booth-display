@@ -12,7 +12,7 @@ This document covers notes, dependencies and testing for developing and maintain
 - FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using VA-API)
 - Intel VA-API driver (`intel-media-driver` / `libva-utils`, etc.)
 - JDK 17 or later / Android SDK (for building the Android client)
-- NDI library: `libndi.so.6` from the NDI SDK, or the copy bundled with cyndilib in `.venv` (`make setup-python`). Building needs cgo (`CGO_ENABLED=1`, a C compiler), not the SDK headers.
+- NDI library: `libndi.so.6` from the official NDI SDK, installed with `make setup-ndi`. Building needs cgo (`CGO_ENABLED=1`, a C compiler), not the SDK headers.
 
 ### Android client environment
 - Requires JDK 17 or later and the Android SDK (`platforms;android-34`, `build-tools;34.0.0`).
