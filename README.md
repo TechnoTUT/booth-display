@@ -12,7 +12,7 @@ See [docs/](docs/) for the architecture and protocol details:
 ## Requirements
 
 - OS: Linux (Debian 12+, Ubuntu 22.04+, AlmaLinux / RHEL 9+, Fedora 39+, etc.)
-- Go: 1.26 or later
+- Go: 1.26 or later, with a C compiler (`gcc`) for cgo (the NDI input calls libndi through cgo)
 - Node.js: 20 or later
 - FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using an Intel GPU)
 - Intel VA-API driver for fast encoding at low CPU load: `intel-media-driver` (iHD) on 5th-gen Broadwell and newer, or the legacy `i965` driver on 3rd/4th-gen Ivy Bridge / Haswell (the reference target is a Core i5-3470)
@@ -22,6 +22,37 @@ See [docs/](docs/) for the architecture and protocol details:
   - JDK 17 or later
   - Android SDK (`platforms;android-34`, `build-tools;34.0.0`)
   - Point to the SDK with `sdk.dir=...` in `android-client/local.properties` or with the `ANDROID_HOME` environment variable
+
+---
+
+## Setup
+
+On a new machine, in this order (each step is explained in its own section below):
+
+```bash
+# 1. FFmpeg and the VA-API driver for your GPU
+#    → see "FFmpeg and hardware acceleration (VA-API) setup"
+
+# 2. NDI runtime: downloads the official NDI SDK for Linux, shows its license,
+#    installs libndi.so.6 to /usr/local/lib and registers it with the dynamic linker (sudo)
+make setup-ndi
+
+# 3. Frontend dependencies (once, and after package-lock.json changes)
+npm --prefix controller/frontend ci
+
+# 4. Build and run
+make build
+./controller/bin/display-controller -config config.yaml
+```
+
+Then open the Web GUI at `http://<host>:8080/` (the port is `server.http_port` in `config.yaml`).
+
+Optional, for development:
+
+- `make run-simulator`: client simulator, a stand-in for the displays (needs `uv`; its Python dependencies are installed automatically)
+- `make ndi-stamp-sender`: NDI test sender for measuring NDI latency (see [docs/development.md](docs/development.md))
+
+Python and a `.venv` are not needed to run the controller.
 
 ---
 
