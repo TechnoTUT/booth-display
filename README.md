@@ -17,7 +17,7 @@ See [docs/](docs/) for the architecture and protocol details:
 - FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using an Intel GPU)
 - Intel VA-API driver for fast encoding at low CPU load: `intel-media-driver` (iHD) on 5th-gen Broadwell and newer, or the legacy `i965` driver on 3rd/4th-gen Ivy Bridge / Haswell (the reference target is a Core i5-3470)
 - NDI runtime (`libndi.so.6`) for NDI input: installed from the official NDI SDK for Linux with `make setup-ndi` (see [NDI runtime](#ndi-runtime))
-- uv: Python package manager (needed for the client simulator)
+- uv: Python package manager (only for the client simulator)
 - To build the Android client:
   - JDK 17 or later
   - Android SDK (`platforms;android-34`, `build-tools;34.0.0`)
@@ -174,7 +174,7 @@ NDI finds senders over mDNS (UDP 5353). If a firewall blocks it, list sender add
 
 ## Client simulator (tools/simulator/)
 
-Lets you check the stream without real hardware: it decodes the H.264 stream received over UDP and shows it in a web browser. The Python environment is created automatically as `.venv` by `uv` from the root `pyproject.toml` (`make setup-python`).
+Lets you check the stream without real hardware: it decodes the H.264 stream received over UDP and shows it in a web browser. Its Python dependencies are declared inside the script (inline script metadata), and `uv run` installs them into a cached environment on first run.
 
 ```bash
 # Start the simulator for display-1 (UDP :8554), then open http://localhost:9001

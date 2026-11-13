@@ -1,4 +1,4 @@
-.PHONY: setup-ndi setup-python all build build-frontend build-backend test run clean dev-frontend
+.PHONY: setup-ndi run-simulator all build build-frontend build-backend test run clean dev-frontend
 
 # デフォルトターゲット: Vue.js と Go をまとめてビルド
 all: build
@@ -32,14 +32,11 @@ dev-frontend:
 setup-ndi:
 	./scripts/install-ndi-sdk.sh
 
-# Python 環境 (.venv) をリポジトリ直下に作成 (シミュレータ用)
-setup-python:
-	uv sync
-
 # 開発・検証用: Androidクライアント画面シミュレータの起動 (Web: http://localhost:9001)
-run-simulator: setup-python
+# (依存パッケージはスクリプト先頭のインラインメタデータに記載、uv が自動で用意)
+run-simulator:
 	@echo "===> Starting Display 1 Simulator (UDP :8554, Web :9001)..."
-	uv run --project . python tools/simulator/client_simulator.py --id "display-1" --port 8554 --web-port 9001
+	uv run tools/simulator/client_simulator.py --id "display-1" --port 8554 --web-port 9001
 
 # ビルド成果物のクリーンアップ
 clean:

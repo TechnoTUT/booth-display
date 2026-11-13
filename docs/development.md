@@ -21,8 +21,8 @@ This document covers notes, dependencies and testing for developing and maintain
 
 ### Client simulator
 - A tool that receives and decodes the UDP stream without real hardware and shows it in a web browser (`tools/simulator/client_simulator.py`).
-- Its dependencies (`av` / `opencv-python` / `numpy`) are managed in `pyproject.toml` at the repository root and installed into `.venv`.
-- Start: `make run-simulator` (runs `make setup-python` automatically) → `http://localhost:9001`
+- Its dependencies (`av` / `opencv-python` / `numpy`) are declared in the script itself (PEP 723 inline metadata); `uv run` installs them into a cached environment.
+- Start: `make run-simulator` (or `uv run tools/simulator/client_simulator.py ...`) → `http://localhost:9001`
 
 ---
 
