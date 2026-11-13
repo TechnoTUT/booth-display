@@ -13,10 +13,12 @@ import (
 
 // TestNDIMixerLatency measures the time from an NDI sender stamping a frame
 // until that frame leaves the canvas mixer (the point where it is handed to
-// the encoder). It needs a sender that stamps frames like the one described
-// below, so it is opt-in:
+// the encoder). It needs a sender that stamps frames as described below, so it
+// is opt-in. tools/ndi-stamp-sender is such a sender; from the repository root:
 //
-//	NDI_LATENCY_SOURCE="booth-latency-test" go test ./internal/pipeline -run TestNDIMixerLatency -v
+//	make ndi-stamp-sender
+//	tools/ndi-stamp-sender/ndi-stamp-sender booth-latency-test &
+//	cd controller && NDI_LATENCY_SOURCE="booth-latency-test" go test ./internal/pipeline -run TestNDIMixerLatency -v
 //
 // The sender must send 1920x1080 frames with a row of 48 black/white blocks,
 // each 40x60 px, at rows 510-569: bit i (block i, white = 1) of the value

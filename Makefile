@@ -1,4 +1,4 @@
-.PHONY: setup-ndi run-simulator all build build-frontend build-backend test run clean dev-frontend
+.PHONY: setup-ndi run-simulator ndi-stamp-sender all build build-frontend build-backend test run clean dev-frontend
 
 # デフォルトターゲット: Vue.js と Go をまとめてビルド
 all: build
@@ -38,7 +38,11 @@ run-simulator:
 	@echo "===> Starting Display 1 Simulator (UDP :8554, Web :9001)..."
 	uv run tools/simulator/client_simulator.py --id "display-1" --port 8554 --web-port 9001
 
+# 開発・検証用: NDI 遅延測定用のテスト送信ツール (TestNDIMixerLatency 用、システムの libndi を使用)
+ndi-stamp-sender:
+	cc -O2 -Wall -o tools/ndi-stamp-sender/ndi-stamp-sender tools/ndi-stamp-sender/ndi_stamp_sender.c -ldl
+
 # ビルド成果物のクリーンアップ
 clean:
 	@echo "===> Cleaning build artifacts..."
-	rm -rf controller/bin controller/web/dist
+	rm -rf controller/bin controller/web/dist tools/ndi-stamp-sender/ndi-stamp-sender

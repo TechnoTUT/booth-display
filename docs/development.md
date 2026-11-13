@@ -44,7 +44,13 @@ This document covers notes, dependencies and testing for developing and maintain
 - The Go `http.Server` has a `WriteTimeout` set. Long-lived connections such as the MJPEG preview (`/api/preview/mjpeg`) clear it with `http.NewResponseController(w).SetWriteDeadline(time.Time{})` so they are not cut off.
 
 ### (4) Measuring NDI latency
-- `TestNDIMixerLatency` (`controller/internal/pipeline/ndi_latency_test.go`) measures the time from an NDI sender stamping a frame until the frame leaves the mixer. It needs a sender that stamps frames as the test describes and runs only when `NDI_LATENCY_SOURCE` names it.
+- `TestNDIMixerLatency` (`controller/internal/pipeline/ndi_latency_test.go`) measures the time from an NDI sender stamping a frame until the frame leaves the mixer. It runs only when `NDI_LATENCY_SOURCE` names a stamping sender. `tools/ndi-stamp-sender` is one (C, uses the system libndi):
+  ```bash
+  make ndi-stamp-sender
+  tools/ndi-stamp-sender/ndi-stamp-sender booth-latency-test &   # args: [name] [fps] [seconds] [bgrx]
+  cd controller && NDI_LATENCY_SOURCE=booth-latency-test go test ./internal/pipeline -run TestNDIMixerLatency -v
+  ```
+  Sender and controller must run on the same host (the stamp is wall-clock time). Run only one sender per name.
 - On a host where mDNS is blocked, point NDI at the sender with `NDI_CONFIG_DIR` and an `ndi-config.v1.json` that lists `127.0.0.1` under `ndi.networks.ips`.
 
 ### (5) Hardware acceleration (VA-API) and permissions
