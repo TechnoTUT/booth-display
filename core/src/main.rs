@@ -109,6 +109,12 @@ fn send_status(engine: &Mutex<Engine>) {
 }
 
 fn run_engine() {
+    // libva logs every display it opens ("libva info: ...") on stderr; keep
+    // its errors only, unless the user asked for more. Set before any thread
+    // starts.
+    if std::env::var_os("LIBVA_MESSAGING_LEVEL").is_none() {
+        std::env::set_var("LIBVA_MESSAGING_LEVEL", "1");
+    }
     output::init();
     // Fix glibc's mmap/trim thresholds so freed frame buffers go back to the
     // OS (as moip-engine does).
