@@ -72,10 +72,11 @@ func (m *WSManager) broadcastLoop() {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
+			st := m.handler.core.Status()
 			payload := map[string]interface{}{
-				"pipeline":  m.handler.engine.GetStatus(),
-				"metrics":   m.handler.streamers.GetAllMetrics(),
-				"scene":     m.handler.engine.GetSceneStatus(),
+				"pipeline":  st.Pipeline,
+				"metrics":   st.Metrics,
+				"scene":     st.Scene,
 				"timestamp": time.Now().UnixMilli(),
 			}
 
