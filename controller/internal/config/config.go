@@ -43,7 +43,7 @@ type MediaConfig struct {
 }
 
 type PipelineConfig struct {
-	Encoder     string `yaml:"encoder" json:"encoder"`           // "auto", "vaapi", "software"
+	Encoder     string `yaml:"encoder" json:"encoder"`           // "auto", "vaapi", "vaapi-ffmpeg", "software"
 	VAAPIDevice string `yaml:"vaapi_device" json:"vaapi_device"` // default: "/dev/dri/renderD128"
 }
 

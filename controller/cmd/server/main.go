@@ -11,14 +11,14 @@ import (
 
 	"booth-display/controller/internal/api"
 	"booth-display/controller/internal/config"
-	"booth-display/controller/internal/pipeline"
-	"booth-display/controller/internal/streamer"
+	"booth-display/controller/internal/core"
 )
 
 func main() {
 	configPath := flag.String("config", "../config.yaml", "Path to config.yaml")
 	httpPort := flag.Int("port", 0, "Override HTTP port")
 	autoStart := flag.Bool("auto-start", false, "Automatically start streaming on launch")
+	corePath := flag.String("core", "", "Path to the booth-core media core binary (default: next to this executable, then PATH)")
 	flag.Parse()
 
 	log.Println("=========================================")
@@ -49,24 +49,31 @@ func main() {
 			i+1, d.Name, d.ID, d.IP, d.Port, d.CropX, d.CropY, d.Width, d.Height, d.BezelPaddingRight)
 	}
 
-	// 2. Initialize Streamer Pool
-	streamers, err := streamer.NewStreamerPool(snap.Displays)
+	// 2. Start the media core (Rust) and hand it the configuration
+	coreBin, err := core.FindBinary(*corePath)
 	if err != nil {
-		log.Fatalf("Fatal: failed to initialize streamer pool: %v", err)
+		log.Fatalf("Fatal: %v", err)
 	}
-	defer streamers.Close()
+	mediaCore := core.New(coreBin)
+	if err := mediaCore.Start(); err != nil {
+		log.Fatalf("Fatal: %v", err)
+	}
+	defer mediaCore.Close()
+	if err := mediaCore.Configure(cfg); err != nil {
+		log.Fatalf("Fatal: failed to configure the media core: %v", err)
+	}
 
-	// 3. Initialize Media Pipeline Engine
-	engine := pipeline.NewPipelineEngine(cfg, streamers)
-	defer engine.Stop()
-
-	// 4. Initialize HTTP & Web-GUI API Server
-	srv := api.NewServer(cfg, engine, streamers)
+	// 3. Initialize HTTP & Web-GUI API Server
+	srv := api.NewServer(cfg, mediaCore)
 
 	// Auto-start streaming if requested
 	if *autoStart {
 		log.Printf("Auto-start enabled. Launching %s pipeline...", snap.Media.DefaultMode)
-		if err := engine.Start(snap.Media.DefaultMode, snap.Media.VideoFile); err != nil {
+		target := snap.Media.VideoFile
+		if snap.Media.DefaultMode != "video" {
+			target = ""
+		}
+		if err := mediaCore.Play(snap.Media.DefaultMode, target); err != nil {
 			log.Printf("Warning: failed to auto-start pipeline: %v", err)
 		}
 	}
@@ -86,7 +93,7 @@ func main() {
 	sig := <-stopSignal
 	log.Printf("Received signal %v. Initiating graceful shutdown...", sig)
 
-	engine.Stop()
+	_ = mediaCore.Stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

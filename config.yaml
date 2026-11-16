@@ -38,5 +38,5 @@ media:
     default_mode: testpattern
     video_file: ""
 pipeline:
-    encoder: auto # "auto", "vaapi", or "software"
+    encoder: auto # "auto" (VA-API if the render node exists, else libx264), "vaapi", "vaapi-ffmpeg" or "software"
     vaapi_device: /dev/dri/renderD128

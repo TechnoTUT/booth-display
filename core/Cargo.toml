@@ -1,0 +1,30 @@
+[package]
+name = "booth-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "booth-display media core: NDI input, canvas mixer, per-display H.264 encoding and UDP streaming"
+
+[[bin]]
+name = "booth-core"
+path = "src/main.rs"
+
+[dependencies]
+# NDI bindings from the moip-engine submodule (git submodule update --init):
+# libndi.so.6 is loaded at run time, so no SDK is needed to build. The
+# submodule commit pins the version; bump it deliberately.
+ndi = { path = "../moip-engine/ndi" }
+anyhow = "1"
+crossbeam-channel = "0.5"
+jpeg-encoder = "0.6"
+libc = "0.2"
+libloading = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1
+panic = "abort"

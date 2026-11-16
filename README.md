@@ -2,7 +2,11 @@
 
 A controller system that drives a tiled booth display built from LG Display LD290EJS-FPN1 panels (1920x540) and keeps them in sync.
 
-It runs as a standalone single binary with a built-in Web GUI. It crops a single virtual canvas into one region per display and streams all of them at once over low-latency UDP (H.264 Annex-B).
+It crops a single virtual canvas into one region per display and streams all of them at once over low-latency UDP (H.264 Annex-B). It is made of three parts:
+
+- **Backend (Go, `controller/`)**: the `display-controller` binary. HTTP/WebSocket API, `config.yaml`, and it runs and supervises the media core. The Web GUI is embedded in it.
+- **Media core (Rust, `core/`)**: the `booth-core` binary. NDI input, canvas mixer, per-display H.264 encoding and UDP streaming. NDI goes through the `ndi` crate of [moip-engine](https://github.com/TechnoTUT/moip-engine), included as a git submodule (`moip-engine/`).
+- **Frontend (Vue 3, `controller/frontend/`)**: the Web GUI.
 
 See [docs/](docs/) for the architecture and protocol details:
 - System architecture: [docs/architecture.md](docs/architecture.md)
@@ -12,9 +16,10 @@ See [docs/](docs/) for the architecture and protocol details:
 ## Requirements
 
 - OS: Linux (Debian 12+, Ubuntu 22.04+, AlmaLinux / RHEL 9+, Fedora 39+, etc.)
-- Go: 1.26 or later, with a C compiler (`gcc`) for cgo (the NDI input calls libndi through cgo)
+- Go: 1.26 or later
+- Rust: stable (cargo), with a C compiler (`gcc`)
 - Node.js: 20 or later
-- FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using an Intel GPU)
+- FFmpeg: 6.0 or later with `libx264` (the software encoder, video-file input and the `vaapi-ffmpeg` encoder)
 - Intel VA-API driver for fast encoding at low CPU load: `intel-media-driver` (iHD) on 5th-gen Broadwell and newer, or the legacy `i965` driver on 3rd/4th-gen Ivy Bridge / Haswell (the reference target is a Core i5-3470)
 - NDI runtime (`libndi.so.6`) for NDI input: installed from the official NDI SDK for Linux with `make setup-ndi` (see [NDI runtime](#ndi-runtime))
 - uv: Python package manager (only for the client simulator)
@@ -30,6 +35,10 @@ See [docs/](docs/) for the architecture and protocol details:
 On a new machine, in this order (each step is explained in its own section below):
 
 ```bash
+# 0. Clone with the moip-engine submodule (or, in an existing clone:
+#    git submodule update --init; make build also does this)
+git clone --recurse-submodules https://github.com/TechnoTUT/booth-display.git
+
 # 1. FFmpeg and the VA-API driver for your GPU
 #    → see "FFmpeg and hardware acceleration (VA-API) setup"
 
@@ -58,7 +67,7 @@ Python and a `.venv` are not needed to run the controller.
 
 ## FFmpeg and hardware acceleration (VA-API) setup
 
-The controller supports hardware-accelerated encoding through **VA-API (`h264_vaapi`)** on Intel integrated graphics (Intel HD / UHD Graphics). This keeps CPU load to a minimum and makes simultaneous real-time 30 fps output to several displays stable. On systems without VA-API it automatically falls back to CPU software encoding with `libx264`.
+The media core encodes in hardware through **VA-API** on Intel integrated graphics (Intel HD / UHD Graphics), calling libva directly (no ffmpeg in between). This keeps CPU load and latency to a minimum and makes simultaneous real-time 30 fps output to several displays stable. On systems without VA-API it automatically falls back to CPU software encoding with `libx264` through FFmpeg. Only the libva runtime and the driver are needed; building needs no libva headers.
 
 ### 1. Install packages
 
@@ -104,9 +113,11 @@ ls -l /dev/dri/renderD*
 # Check for H.264 encode support (VAEntrypointEncSlice)
 vainfo
 
-# Check that FFmpeg has the VA-API encoder
+# Optional: check that FFmpeg has the VA-API encoder (only for encoder: vaapi-ffmpeg)
 ffmpeg -hide_banner -encoders | grep h264_vaapi
 ```
+
+After `make build`, the controller log shows which encoder runs, e.g. `[encoder] VA-API: Intel i965 driver ... (EncSlice, derived image)`, and `/api/status` reports it as `pipeline.encoder` (`vaapi`, `vaapi-ffmpeg` or `libx264`). `LIBVA_DRIVER_NAME=i965` or `iHD` forces a driver.
 
 > **Note**: The user running the controller needs access to `/dev/dri/renderD128`. If needed, add the user to the `render` (or `video`) group with `sudo usermod -aG render $USER` and log in again.
 
@@ -114,7 +125,7 @@ ffmpeg -hide_banner -encoders | grep h264_vaapi
 
 ## Building
 
-The Makefile in the repository root builds the frontend (Vue 3) and the backend (Go) together. The frontend build output is embedded into the Go binary.
+The Makefile in the repository root builds the frontend (Vue 3), the media core (Rust) and the backend (Go) together. The frontend build output is embedded into the Go binary.
 
 ```bash
 # Build frontend and backend
@@ -124,11 +135,12 @@ make build
 make test
 ```
 
-The build produces `controller/bin/display-controller`.
+The build produces `controller/bin/display-controller` and, next to it, `controller/bin/booth-core`. Keep the two together: the controller looks for `booth-core` in its own directory, then on `PATH` (or pass `-core /path/to/booth-core`).
 
 Individual targets for development:
 ```bash
 make build-frontend  # Build the frontend only
+make build-core      # Build the Rust media core only (initializes the submodule if needed)
 make build-backend   # Build the Go controller only
 make dev-frontend    # Start the frontend dev server (Vite)
 ```
@@ -181,7 +193,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## NDI runtime
 
-The controller receives NDI directly through the NDI SDK library (`libndi`), loaded at runtime. Install it once per machine from the official NDI SDK for Linux:
+The media core (`booth-core`) receives NDI through the NDI SDK library (`libndi`), loaded at runtime by moip-engine's `ndi` crate, so building needs no SDK. Install it once per machine from the official NDI SDK for Linux:
 
 ```bash
 make setup-ndi   # scripts/install-ndi-sdk.sh: downloads the SDK, shows its license, installs libndi.so.6 to /usr/local/lib (sudo)
@@ -189,11 +201,11 @@ make setup-ndi   # scripts/install-ndi-sdk.sh: downloads the SDK, shows its lice
 
 The script registers `/usr/local/lib` with the dynamic linker (`/etc/ld.so.conf.d/ndi-sdk.conf`) when it is not searched already, as on Fedora/RHEL. `PREFIX=/opt/ndi make setup-ndi` installs elsewhere. On further machines, `NDI_ACCEPT_LICENSE=yes make setup-ndi` skips the license prompt once you have accepted it.
 
-The controller looks for the library in this order:
+The library is looked for in this order:
 
 1. `$NDI_RUNTIME_DIR_V6/libndi.so.6` (the NDI SDK's environment variable)
 2. `libndi.so.6` / `libndi.so` on the system library path
-3. `/usr/local/lib/libndi.so.6`
+3. `/usr/local/lib/libndi.so.6`, then `/usr/lib/libndi.so.6`
 
 Without it, everything except NDI input works, and the GUI shows why NDI is unavailable.
 
@@ -265,7 +277,7 @@ media:
   video_file: ""
 
 pipeline:
-  encoder: "auto" # "auto" (prefer VA-API, fall back automatically), "vaapi", or "software"
+  encoder: "auto" # "auto" (prefer VA-API, fall back automatically), "vaapi", "vaapi-ffmpeg" (VA-API through ffmpeg, for comparison) or "software"
   vaapi_device: "/dev/dri/renderD128" # VA-API device node
 ```
 

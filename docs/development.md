@@ -7,12 +7,14 @@ This document covers notes, dependencies and testing for developing and maintain
 ## 1. Development environment and tools
 
 - Go: 1.26 or later (matches `go 1.26.7` in `controller/go.mod`)
+- Rust: stable toolchain (cargo) for the media core (`core/`)
+- The moip-engine submodule: `git submodule update --init` (`make build` / `make build-core` run it when `moip-engine/` is empty)
 - Node.js: v20 or later
 - uv: Python package manager
 - FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using VA-API)
 - Intel VA-API driver (`intel-media-driver` / `libva-utils`, etc.)
 - JDK 17 or later / Android SDK (for building the Android client)
-- NDI library: `libndi.so.6` from the official NDI SDK, installed with `make setup-ndi`. Building needs cgo (`CGO_ENABLED=1`, a C compiler), not the SDK headers.
+- NDI library: `libndi.so.6` from the official NDI SDK, installed with `make setup-ndi`. It is needed only at run time; building needs no SDK headers.
 
 ### Android client environment
 - Requires JDK 17 or later and the Android SDK (`platforms;android-34`, `build-tools;34.0.0`).
@@ -44,11 +46,11 @@ This document covers notes, dependencies and testing for developing and maintain
 - The Go `http.Server` has a `WriteTimeout` set. Long-lived connections such as the MJPEG preview (`/api/preview/mjpeg`) clear it with `http.NewResponseController(w).SetWriteDeadline(time.Time{})` so they are not cut off.
 
 ### (4) Measuring NDI latency
-- `TestNDIMixerLatency` (`controller/internal/pipeline/ndi_latency_test.go`) measures the time from an NDI sender stamping a frame until the frame leaves the mixer. It runs only when `NDI_LATENCY_SOURCE` names a stamping sender. `tools/ndi-stamp-sender` is one (C, uses the system libndi):
+- The `ndi_latency` test (`core/src/mixer.rs`) measures the time from an NDI sender stamping a frame until the frame leaves the mixer. It runs only when `NDI_LATENCY_SOURCE` names a stamping sender. `tools/ndi-stamp-sender` is one (C, uses the system libndi):
   ```bash
   make ndi-stamp-sender
   tools/ndi-stamp-sender/ndi-stamp-sender booth-latency-test &   # args: [name] [fps] [seconds] [bgrx]
-  cd controller && NDI_LATENCY_SOURCE=booth-latency-test go test ./internal/pipeline -run TestNDIMixerLatency -v
+  NDI_LATENCY_SOURCE=booth-latency-test cargo test --release --manifest-path core/Cargo.toml ndi_latency -- --nocapture
   ```
   Sender and controller must run on the same host (the stamp is wall-clock time). Run only one sender per name.
 - On a host where mDNS is blocked, point NDI at the sender with `NDI_CONFIG_DIR` and an `ndi-config.v1.json` that lists `127.0.0.1` under `ndi.networks.ips`.
@@ -66,10 +68,21 @@ This document covers notes, dependencies and testing for developing and maintain
 
 ## 3. Testing
 
-- Unit and end-to-end tests:
+- All tests (builds the media core first):
   ```bash
   make test
   ```
-  - `controller/internal/protocol`: packet header marshaling, and splitting/reassembly at the MTU limit
-  - `controller/internal/pipeline`: the H.264 NALU parser
-  - `controller/internal`: an integration test of the whole controller, from UDP output to checking the received packets
+  - `core/` (Rust, `cargo test`): packet header and MTU splitting, sender frame admission and keyframe resync, FLV parsing (including a round trip through real ffmpeg encoders), the scaler and UYVY conversion, mixer transitions and frame rate, encoder arguments
+  - `core/` VA-API: the struct layouts, and an encode of a moving pattern that must decode with ffmpeg at > 35 dB luma PSNR with an IDR (with SPS/PPS) at each GOP start. Run it once more with `LIBVA_DRIVER_NAME=i965` to cover the Ivy Bridge driver; it is skipped without `/dev/dri/renderD128`. `libva-devel` (`libva-dev` on Debian) adds a check of the layouts against the installed headers.
+  - `controller/internal` (Go): an end-to-end test that runs the controller with a built `booth-core` and checks UDP output, metrics, preview, switching and stop, with libx264 and (when a render node exists) VA-API. It is skipped when no `booth-core` is built; `BOOTH_CORE_BIN` points it at a binary.
+- Opt-in measurements (machine dependent):
+  ```bash
+  # Scaler speed (NDI receive path)
+  cargo test --release --manifest-path core/Cargo.toml scale::tests::bench -- --ignored --nocapture
+  # Canvas frame in -> access unit out, with CPU use. LIBVA_DRIVER_NAME=i965 uses the Ivy Bridge driver.
+  # In-process VA-API (3 displays in parallel):
+  LATENCY_TEST=1 cargo test --release --manifest-path core/Cargo.toml vaenc::tests::latency -- --nocapture
+  # ffmpeg libx264 and h264_vaapi (LATENCY_IVY=1 masks AVX2/FMA3/BMI in ffmpeg and x264):
+  LATENCY_TEST=1 cargo test --release --manifest-path core/Cargo.toml encoder::tests::latency -- --nocapture
+  ```
+- Running the core by hand: `controller/bin/booth-core engine` reads JSON commands on stdin (e.g. `{"id":1,"cmd":"start","mode":"testpattern"}`) and writes framed events on stdout; `booth-core discover` lists NDI sources and `booth-core version` prints the NDI runtime version.

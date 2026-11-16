@@ -11,22 +11,16 @@ import (
 	"time"
 
 	"booth-display/controller/internal/config"
-	"booth-display/controller/internal/pipeline"
-	"booth-display/controller/internal/streamer"
+	"booth-display/controller/internal/core"
 )
 
 type APIHandler struct {
-	cfg       *config.Config
-	engine    *pipeline.PipelineEngine
-	streamers *streamer.StreamerPool
+	cfg  *config.Config
+	core *core.Client
 }
 
-func NewAPIHandler(cfg *config.Config, engine *pipeline.PipelineEngine, streamers *streamer.StreamerPool) *APIHandler {
-	return &APIHandler{
-		cfg:       cfg,
-		engine:    engine,
-		streamers: streamers,
-	}
+func NewAPIHandler(cfg *config.Config, c *core.Client) *APIHandler {
+	return &APIHandler{cfg: cfg, core: c}
 }
 
 func (h *APIHandler) HandleGetConfig(w http.ResponseWriter, r *http.Request) {
@@ -61,8 +55,11 @@ func (h *APIHandler) HandlePostConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to save displays: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// Rebuild streamer senders and pipeline
-		_ = h.engine.RebuildPipelines(req.Displays)
+		// Rebuild the senders and, if streaming, the encoder in the core
+		if err := h.core.Configure(h.cfg); err != nil {
+			http.Error(w, "Saved, but failed to apply displays: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -94,12 +91,15 @@ func (h *APIHandler) HandlePlayback(w http.ResponseWriter, r *http.Request) {
 		if req.Mode == "ndi" {
 			target = req.NDISource
 		}
-		if err := h.engine.Start(req.Mode, target); err != nil {
+		if err := h.core.Play(req.Mode, target); err != nil {
 			http.Error(w, "Failed to start pipeline: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 	case "stop":
-		h.engine.Stop()
+		if err := h.core.Stop(); err != nil {
+			http.Error(w, "Failed to stop pipeline: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	default:
 		http.Error(w, "Unknown action: "+req.Action, http.StatusBadRequest)
 		return
@@ -108,7 +108,7 @@ func (h *APIHandler) HandlePlayback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":   "ok",
-		"pipeline": h.engine.GetStatus(),
+		"pipeline": h.core.Status().Pipeline,
 	})
 }
 
@@ -122,12 +122,12 @@ func (h *APIHandler) HandleNDISources(w http.ResponseWriter, r *http.Request) {
 	// so extend the write deadline for this response only.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
 
-	sources, err := pipeline.DiscoverNDISources()
+	sources, err := h.core.DiscoverNDISources()
 	resp := map[string]interface{}{}
 	if err != nil {
 		// Return an empty list and the reason so the GUI can show it instead of failing silently
 		log.Printf("[NDI] source discovery failed: %v", err)
-		sources = []pipeline.NDISource{}
+		sources = []core.NDISource{}
 		resp["error"] = err.Error()
 	}
 	resp["sources"] = sources
@@ -142,10 +142,11 @@ func (h *APIHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	st := h.core.Status()
 	resp := map[string]interface{}{
-		"pipeline": h.engine.GetStatus(),
-		"metrics":  h.streamers.GetAllMetrics(),
-		"scene":    h.engine.GetSceneStatus(),
+		"pipeline": st.Pipeline,
+		"metrics":  st.Metrics,
+		"scene":    st.Scene,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -159,7 +160,7 @@ func (h *APIHandler) HandleSceneStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(h.engine.GetSceneStatus())
+	_ = json.NewEncoder(w).Encode(h.core.Status().Scene)
 }
 
 type SceneSwitchRequest struct {
@@ -181,12 +182,7 @@ func (h *APIHandler) HandleSceneSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	trans := pipeline.TransitionType(req.Transition)
-	if trans == "" {
-		trans = pipeline.TransitionCut
-	}
-
-	if err := h.engine.SwitchScene(req.SourceType, req.Target, trans, req.DurationMs); err != nil {
+	if err := h.core.Switch(req.SourceType, req.Target, req.Transition, req.DurationMs); err != nil {
 		http.Error(w, "Failed to switch scene: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -194,7 +190,7 @@ func (h *APIHandler) HandleSceneSwitch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "ok",
-		"scene":  h.engine.GetSceneStatus(),
+		"scene":  h.core.Status().Scene,
 	})
 }
 
@@ -240,7 +236,7 @@ func (h *APIHandler) HandleListAssets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) HandlePreviewMJPEG(w http.ResponseWriter, r *http.Request) {
-	broadcaster := h.engine.GetPreviewBroadcaster()
+	broadcaster := h.core.Preview()
 	sub := broadcaster.Subscribe()
 	defer broadcaster.Unsubscribe(sub)
 
@@ -282,7 +278,7 @@ func (h *APIHandler) HandlePreviewMJPEG(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *APIHandler) HandlePreviewSnapshot(w http.ResponseWriter, r *http.Request) {
-	broadcaster := h.engine.GetPreviewBroadcaster()
+	broadcaster := h.core.Preview()
 	frame := broadcaster.GetLatest()
 
 	if len(frame) == 0 {

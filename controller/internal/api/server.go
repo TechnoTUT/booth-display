@@ -8,8 +8,7 @@ import (
 	"time"
 
 	"booth-display/controller/internal/config"
-	"booth-display/controller/internal/pipeline"
-	"booth-display/controller/internal/streamer"
+	"booth-display/controller/internal/core"
 	"booth-display/controller/web"
 )
 
@@ -18,11 +17,11 @@ type Server struct {
 	wsManager  *WSManager
 }
 
-func NewServer(cfg *config.Config, engine *pipeline.PipelineEngine, streamers *streamer.StreamerPool) *Server {
+func NewServer(cfg *config.Config, c *core.Client) *Server {
 	snap := cfg.GetSnapshot()
 	mux := http.NewServeMux()
 
-	handler := NewAPIHandler(cfg, engine, streamers)
+	handler := NewAPIHandler(cfg, c)
 	wsMgr := NewWSManager(handler)
 
 	// API routes
