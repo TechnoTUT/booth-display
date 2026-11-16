@@ -31,6 +31,7 @@ mod testpattern;
 mod vaapi;
 mod vaenc;
 mod x264;
+mod x264enc;
 
 use config::{CanvasConfig, DisplayConfig, PipelineConfig};
 use engine::Engine;

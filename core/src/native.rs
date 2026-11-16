@@ -1,8 +1,9 @@
-//! In-process encoding in the pipeline, for any `FrameEncoder` (`vaenc`): one
-//! thread per display takes every canvas frame from the mixer, converts its
-//! crop to NV12 straight into the encoder's input, encodes it and hands the
-//! access unit to the display's sender. No ffmpeg process, no pipe copies of
-//! the canvas, and the displays encode in parallel.
+//! In-process encoding in the pipeline, shared by the VA-API (`vaenc`) and
+//! libx264 (`x264enc`) encoders: one thread per display takes every canvas
+//! frame from the mixer, converts its crop to NV12 straight into the encoder's
+//! input, encodes it and hands the access unit to the display's sender. No
+//! ffmpeg process, no pipe copies of the canvas, and the displays encode in
+//! parallel.
 
 use crate::config::{Canvas, DisplayConfig};
 use crate::frame::Frame;
@@ -23,6 +24,12 @@ pub trait FrameEncoder: Send + 'static {
 }
 
 impl FrameEncoder for crate::vaapi::h264::Encoder {
+    fn encode_frame(&mut self, fill: &mut dyn FnMut(&mut Nv12Planes)) -> Result<(&[u8], bool)> {
+        self.encode(fill)
+    }
+}
+
+impl FrameEncoder for crate::x264::Encoder {
     fn encode_frame(&mut self, fill: &mut dyn FnMut(&mut Nv12Planes)) -> Result<(&[u8], bool)> {
         self.encode(fill)
     }
