@@ -29,6 +29,7 @@ mod sender;
 mod testpattern;
 mod vaapi;
 mod vaenc;
+mod x264;
 
 use config::{CanvasConfig, DisplayConfig, PipelineConfig};
 use engine::Engine;
