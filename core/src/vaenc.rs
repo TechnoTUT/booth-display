@@ -96,3 +96,84 @@ impl Drop for NativeRun {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// CPU time (user + system) of the calling thread.
+    pub fn thread_cpu() -> Duration {
+        // SAFETY: getrusage fills the struct.
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut ru) };
+        let tv = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
+        tv(ru.ru_utime) + tv(ru.ru_stime)
+    }
+
+    /// Canvas frame handed to the encoder -> access unit ready, for the three
+    /// 1920x540 displays of the default canvas encoded in parallel, plus the
+    /// encode threads' CPU time. Opt-in, like encoder::tests::latency:
+    ///
+    ///     LATENCY_TEST=1 cargo test --release vaenc::tests::latency -- --nocapture
+    ///
+    /// LIBVA_DRIVER_NAME=i965 uses the Ivy Bridge driver.
+    #[test]
+    fn latency() {
+        if std::env::var_os("LATENCY_TEST").is_none() {
+            eprintln!("set LATENCY_TEST=1 to run");
+            return;
+        }
+        const FRAMES: usize = 150;
+        let canvas = Canvas { width: 5760, height: 540, fps: 30 };
+        let p = Params { width: 1920, height: 540, fps: 30, bitrate: BITRATE, buffer_bits: BUFFER_BITS, gop: 30 };
+        let mut txs = Vec::new();
+        let mut threads = Vec::new();
+        for d in 0..3usize {
+            let (tx, rx) = bounded::<(Arc<Vec<u8>>, Instant)>(2);
+            txs.push(tx);
+            let mut enc = Encoder::new("/dev/dri/renderD128", p).expect("VA-API encoder");
+            if d == 0 {
+                eprintln!("encoder: {}", enc.describe());
+            }
+            threads.push(std::thread::spawn(move || {
+                let (mut lat, cpu0) = (Vec::new(), thread_cpu());
+                for (f, sent) in rx.iter() {
+                    enc.encode(|planes| bgrx_to_nv12(&f, canvas.width * 4, d * 1920, 0, 540, planes)).unwrap();
+                    lat.push(sent.elapsed().as_secs_f64() * 1000.0);
+                }
+                (lat, thread_cpu() - cpu0)
+            }));
+        }
+        let start = Instant::now();
+        for i in 0..FRAMES {
+            let due = start + Duration::from_secs(1) * i as u32 / 30;
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+            let mut frame = vec![0u8; canvas.frame_size()];
+            for (j, px) in frame.chunks_exact_mut(4).enumerate() {
+                px[0] = (i * 3 + (j >> 2)) as u8;
+                px[1] = (i + (j >> 8)) as u8;
+            }
+            let (f, sent) = (Arc::new(frame), Instant::now());
+            for tx in &txs {
+                tx.send((f.clone(), sent)).unwrap();
+            }
+        }
+        drop(txs);
+        let wall = Duration::from_secs(1) * FRAMES as u32 / 30;
+        let mut cpu = Duration::ZERO;
+        let mut all = Vec::new();
+        for t in threads {
+            let (lat, c) = t.join().unwrap();
+            assert_eq!(lat.len(), FRAMES);
+            cpu += c;
+            all.extend_from_slice(&lat[15..]);
+        }
+        all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "in-process VA-API, 3 displays: frame -> access unit median {:.1} ms, p90 {:.1} ms; encode threads CPU {:.0}% of one core",
+            all[all.len() / 2],
+            all[all.len() * 9 / 10],
+            cpu.as_secs_f64() / wall.as_secs_f64() * 100.0
+        );
+    }
+}

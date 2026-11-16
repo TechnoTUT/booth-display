@@ -370,6 +370,15 @@ mod tests {
         }
     }
 
+    /// CPU seconds (user + system) of all reaped child processes so far.
+    fn children_cpu() -> f64 {
+        // SAFETY: getrusage fills the struct.
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) };
+        let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+        secs(ru.ru_utime) + secs(ru.ru_stime)
+    }
+
     fn measure(vaapi: Option<&str>) {
         let canvas = Canvas { width: 5760, height: 540, fps: 30 };
         let ds = displays();
@@ -384,6 +393,7 @@ mod tests {
                 }
             }
         }
+        let cpu0 = children_cpu();
         let mut pipes = OutputPipes::new(ds.len()).unwrap();
         let mut cmd = Command::new("ffmpeg");
         cmd.args(&args).stdin(Stdio::piped()).stderr(Stdio::inherit());
@@ -428,11 +438,13 @@ mod tests {
         let sent = sent.lock().unwrap();
         let mut lat: Vec<f64> = (15..got.len().min(FRAMES)).map(|i| (got[i] - sent[i]).as_secs_f64() * 1000.0).collect();
         lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let cpu = children_cpu() - cpu0;
         eprintln!(
-            "{}: frame written -> access unit ready: median {:.1} ms, p90 {:.1} ms",
+            "{} (ffmpeg): frame written -> access unit ready: median {:.1} ms, p90 {:.1} ms; ffmpeg CPU {:.0}% of one core",
             vaapi.map_or("libx264", |_| "h264_vaapi"),
             lat[lat.len() / 2],
-            lat[lat.len() * 9 / 10]
+            lat[lat.len() * 9 / 10],
+            cpu / (FRAMES as f64 / 30.0) * 100.0
         );
     }
 }
