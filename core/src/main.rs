@@ -10,4 +10,6 @@ mod logo;
 mod ffsource;
 mod ndi_input;
 mod mixer;
+mod flv;
+mod encoder;
 fn main() {}
