@@ -19,7 +19,7 @@ See [docs/](docs/) for the architecture and protocol details:
 - Go: 1.26 or later
 - Rust: stable (cargo), with a C compiler (`gcc`)
 - Node.js: 20 or later
-- FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using an Intel GPU)
+- FFmpeg: 6.0 or later with `libx264` (the software encoder, video-file input and the `vaapi-ffmpeg` encoder)
 - Intel VA-API driver for fast encoding at low CPU load: `intel-media-driver` (iHD) on 5th-gen Broadwell and newer, or the legacy `i965` driver on 3rd/4th-gen Ivy Bridge / Haswell (the reference target is a Core i5-3470)
 - NDI runtime (`libndi.so.6`) for NDI input: installed from the official NDI SDK for Linux with `make setup-ndi` (see [NDI runtime](#ndi-runtime))
 - uv: Python package manager (only for the client simulator)
@@ -67,7 +67,7 @@ Python and a `.venv` are not needed to run the controller.
 
 ## FFmpeg and hardware acceleration (VA-API) setup
 
-The controller supports hardware-accelerated encoding through **VA-API (`h264_vaapi`)** on Intel integrated graphics (Intel HD / UHD Graphics). This keeps CPU load to a minimum and makes simultaneous real-time 30 fps output to several displays stable. On systems without VA-API it automatically falls back to CPU software encoding with `libx264`.
+The media core encodes in hardware through **VA-API** on Intel integrated graphics (Intel HD / UHD Graphics), calling libva directly (no ffmpeg in between). This keeps CPU load and latency to a minimum and makes simultaneous real-time 30 fps output to several displays stable. On systems without VA-API it automatically falls back to CPU software encoding with `libx264` through FFmpeg. Only the libva runtime and the driver are needed; building needs no libva headers.
 
 ### 1. Install packages
 
@@ -113,9 +113,11 @@ ls -l /dev/dri/renderD*
 # Check for H.264 encode support (VAEntrypointEncSlice)
 vainfo
 
-# Check that FFmpeg has the VA-API encoder
+# Optional: check that FFmpeg has the VA-API encoder (only for encoder: vaapi-ffmpeg)
 ffmpeg -hide_banner -encoders | grep h264_vaapi
 ```
+
+After `make build`, the controller log shows which encoder runs, e.g. `[encoder] VA-API: Intel i965 driver ... (EncSlice, derived image)`, and `/api/status` reports it as `pipeline.encoder` (`vaapi`, `vaapi-ffmpeg` or `libx264`). `LIBVA_DRIVER_NAME=i965` or `iHD` forces a driver.
 
 > **Note**: The user running the controller needs access to `/dev/dri/renderD128`. If needed, add the user to the `render` (or `video`) group with `sudo usermod -aG render $USER` and log in again.
 
@@ -275,7 +277,7 @@ media:
   video_file: ""
 
 pipeline:
-  encoder: "auto" # "auto" (prefer VA-API, fall back automatically), "vaapi", or "software"
+  encoder: "auto" # "auto" (prefer VA-API, fall back automatically), "vaapi", "vaapi-ffmpeg" (VA-API through ffmpeg, for comparison) or "software"
   vaapi_device: "/dev/dri/renderD128" # VA-API device node
 ```
 
