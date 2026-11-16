@@ -8,4 +8,5 @@ mod frame;
 mod testpattern;
 mod logo;
 mod ffsource;
+mod ndi_input;
 fn main() {}
