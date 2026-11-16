@@ -155,7 +155,7 @@ pub struct Encoder {
     /// The encoder running now: "vaapi", "vaapi-ffmpeg" or "libx264".
     kind: &'static str,
     /// The native VA-API encoder, when it runs instead of ffmpeg.
-    native: Option<crate::vaenc::NativeRun>,
+    native: Option<crate::native::NativeRun>,
     /// Why the encoder stopped although it was not asked to.
     exit_err: Arc<Mutex<Option<String>>>,
 }

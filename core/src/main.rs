@@ -21,6 +21,7 @@ mod logo;
 mod mixer;
 mod nv12;
 mod ndi_input;
+mod native;
 mod output;
 mod preview;
 mod protocol;
