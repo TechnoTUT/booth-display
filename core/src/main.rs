@@ -28,6 +28,7 @@ mod scale;
 mod sender;
 mod testpattern;
 mod vaapi;
+mod vaenc;
 
 use config::{CanvasConfig, DisplayConfig, PipelineConfig};
 use engine::Engine;

@@ -14,6 +14,9 @@ pub struct PipelineStatus {
     pub is_running: bool,
     pub active_mode: String,
     pub video_file: String,
+    /// The running encoder: "vaapi", "vaapi-ffmpeg" or "libx264".
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub encoder: &'static str,
     /// Set when the encoder or the NDI input stopped unexpectedly while running.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -178,6 +181,7 @@ impl Engine {
                 is_running: self.running,
                 active_mode: self.active_mode.clone(),
                 video_file: self.video_file.clone(),
+                encoder: self.encoder.kind(),
                 error: if self.running { error } else { None },
             },
             scene,

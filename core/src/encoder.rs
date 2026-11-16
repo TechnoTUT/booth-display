@@ -6,7 +6,7 @@
 //! Intel VA-API (h264_vaapi) keeps the CPU load minimal; libx264 is the
 //! automatic fallback when VA-API is missing or fails to start.
 
-use crate::config::{Canvas, DisplayConfig, PipelineConfig};
+use crate::config::{Canvas, DisplayConfig, EncoderMode, PipelineConfig};
 use crate::flv::FlvReader;
 use crate::frame::Frame;
 use crate::protocol::PAYLOAD_H264;
@@ -152,7 +152,11 @@ struct Running {
 #[derive(Default)]
 pub struct Encoder {
     running: Option<Running>,
-    /// Why ffmpeg exited although it was not stopped.
+    /// The encoder running now: "vaapi", "vaapi-ffmpeg" or "libx264".
+    kind: &'static str,
+    /// The native VA-API encoder, when it runs instead of ffmpeg.
+    native: Option<crate::vaenc::NativeRun>,
+    /// Why the encoder stopped although it was not asked to.
     exit_err: Arc<Mutex<Option<String>>>,
 }
 
@@ -171,15 +175,35 @@ impl Encoder {
         if displays.is_empty() {
             return Ok(());
         }
-        if let Some(dev) = cfg.vaapi_device() {
-            eprintln!("[encoder] starting hardware encoder: VA-API ({dev})");
-            match self.spawn(canvas, displays, senders, Some(&dev), subscribe()) {
-                Ok(()) => return Ok(()),
-                Err(e) => eprintln!("[encoder] VA-API encoding failed: {e}. Falling back to software libx264."),
+        *self.exit_err.lock().unwrap() = None;
+        match cfg.mode() {
+            EncoderMode::Vaapi(dev) => {
+                eprintln!("[encoder] starting hardware encoder: VA-API ({dev}), in-process");
+                match crate::vaenc::start(canvas, displays, senders, &dev, subscribe, self.exit_err.clone()) {
+                    Ok(run) => {
+                        self.native = Some(run);
+                        self.kind = "vaapi";
+                        return Ok(());
+                    }
+                    Err(e) => eprintln!("[encoder] VA-API encoding failed: {e:#}. Falling back to software libx264."),
+                }
             }
+            EncoderMode::FfmpegVaapi(dev) => {
+                eprintln!("[encoder] starting hardware encoder: ffmpeg h264_vaapi ({dev})");
+                match self.spawn(canvas, displays, senders, Some(&dev), subscribe()) {
+                    Ok(()) => {
+                        self.kind = "vaapi-ffmpeg";
+                        return Ok(());
+                    }
+                    Err(e) => eprintln!("[encoder] VA-API encoding failed: {e}. Falling back to software libx264."),
+                }
+            }
+            EncoderMode::Software => {}
         }
         eprintln!("[encoder] starting software encoder: libx264 (ultrafast)");
-        self.spawn(canvas, displays, senders, None, subscribe())
+        self.spawn(canvas, displays, senders, None, subscribe())?;
+        self.kind = "libx264";
+        Ok(())
     }
 
     fn spawn(
@@ -267,12 +291,19 @@ impl Encoder {
         Ok(())
     }
 
+    /// The running encoder ("vaapi", "vaapi-ffmpeg", "libx264"), or "" when stopped.
+    pub fn kind(&self) -> &'static str {
+        self.kind
+    }
+
     /// Why the encoder stopped unexpectedly, or None while it is healthy.
     pub fn err(&self) -> Option<String> {
         self.exit_err.lock().unwrap().clone()
     }
 
     pub fn stop(&mut self) {
+        self.native = None; // joins the encode threads
+        self.kind = "";
         let Some(r) = self.running.take() else { return };
         r.stopping.store(true, Ordering::SeqCst);
         // Not reaped yet while `done` is open, so the pid is still ours.

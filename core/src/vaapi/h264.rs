@@ -8,7 +8,7 @@
 //! surface is synced and the coded buffer read back before `encode` returns,
 //! which is the lowest latency the hardware allows.
 
-use super::sys::{self, *};
+use super::sys::*;
 use super::Display;
 use crate::nv12::Nv12Planes;
 use anyhow::{bail, Result};

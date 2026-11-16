@@ -58,25 +58,54 @@ pub struct DisplayConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PipelineConfig {
-    /// "auto", "vaapi" or "software".
+    /// "auto", "vaapi" (in-process), "vaapi-ffmpeg" or "software".
     pub encoder: String,
     pub vaapi_device: String,
 }
 
 pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
+/// Which encoder to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncoderMode {
+    /// VA-API driven directly from booth-core, on this render node.
+    Vaapi(String),
+    /// VA-API through ffmpeg's h264_vaapi (the previous encoder; for comparison).
+    FfmpegVaapi(String),
+    /// libx264 through ffmpeg.
+    Software,
+}
+
 impl PipelineConfig {
-    /// Whether to try VA-API, and on which render node.
-    pub fn vaapi_device(&self) -> Option<String> {
+    /// The encoder to try first. "auto" uses VA-API when the render node exists.
+    pub fn mode(&self) -> EncoderMode {
         let device = if self.vaapi_device.is_empty() {
             DEFAULT_VAAPI_DEVICE.to_string()
         } else {
             self.vaapi_device.clone()
         };
         match self.encoder.to_ascii_lowercase().as_str() {
-            "software" | "x264" | "libx264" | "cpu" => None,
-            "vaapi" | "hw" | "gpu" => Some(device),
-            _ => std::path::Path::new(&device).exists().then_some(device),
+            "software" | "x264" | "libx264" | "cpu" => EncoderMode::Software,
+            "vaapi-ffmpeg" | "ffmpeg-vaapi" => EncoderMode::FfmpegVaapi(device),
+            "vaapi" | "hw" | "gpu" => EncoderMode::Vaapi(device),
+            _ if std::path::Path::new(&device).exists() => EncoderMode::Vaapi(device),
+            _ => EncoderMode::Software,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoder_modes() {
+        let m = |e: &str| PipelineConfig { encoder: e.into(), vaapi_device: "/dev/null".into() }.mode();
+        assert_eq!(m("software"), EncoderMode::Software);
+        assert_eq!(m("vaapi"), EncoderMode::Vaapi("/dev/null".into()));
+        assert_eq!(m("vaapi-ffmpeg"), EncoderMode::FfmpegVaapi("/dev/null".into()));
+        assert_eq!(m("auto"), EncoderMode::Vaapi("/dev/null".into()));
+        let missing = PipelineConfig { encoder: "auto".into(), vaapi_device: "/nonexistent".into() };
+        assert_eq!(missing.mode(), EncoderMode::Software);
     }
 }
