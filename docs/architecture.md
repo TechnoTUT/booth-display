@@ -26,7 +26,7 @@ flowchart TB
                 NDISource["NDI (moip-engine ndi crate, libndi)"]
             end
             CanvasMixer["Canvas mixer & transitions"]
-            Encoder["Single-process multi-output encoder<br/>(ffmpeg: VA-API / x264 zerolatency)"]
+            Encoder["Per-display H.264 encoders<br/>(VA-API in-process / ffmpeg x264 fallback)"]
             Senders["UDP senders (one per display)"]
             Preview["JPEG preview"]
         end
@@ -89,7 +89,13 @@ flowchart TB
 - Canvas mixer (`mixer.rs`):
   - Renders at the canvas rate (30 fps), driven by NDI frame arrival when NDI is active, and handles transitions (cut, crossfade, dip to black) without restarting the encoder. Blends run in 16-bit lanes so they vectorize with SSE2.
   - Frames come from a pool and are shared by reference count between subscribers (no per-subscriber copy); a subscriber that falls two frames behind loses frames instead of delaying the others.
-- Single-process encoding (`encoder.rs`):
+- Encoding (`encoder.rs`) picks the encoder from `pipeline.encoder` (`auto`/`vaapi`, `vaapi-ffmpeg`, `software`) and falls back to libx264 when VA-API cannot start. The status reports which one runs (`pipeline.encoder`).
+- **In-process VA-API** (`vaenc.rs`, `vaapi/`), the default when `/dev/dri/renderD128` exists:
+  - libva (`libva.so.2`, `libva-drm.so.2`) is loaded at run time with hand-written bindings, so the build needs no libva headers; the struct layouts are tested against the libva 2.22 headers (and the installed ones when `libva-devel` is present).
+  - One thread and one VA display per display: it takes each canvas frame from the mixer, converts its crop to NV12 (BT.601 limited, `nv12.rs`) straight into the VA input surface and encodes it synchronously. There is no ffmpeg process and no pipe copy of the 12 MB canvas, and the displays encode in parallel.
+  - Constrained Baseline, one slice per frame, IDR at the start of every one-second GOP, P-frames with one reference, CBR 12 Mbps with a 1 Mbit HRD buffer, AUD on every access unit. The driver writes slice headers; SPS and PPS are written by booth-core (`vaapi/headers.rs`) and put in front of every IDR, because the drivers emit none without packed headers. The SPS signals no frame reordering, so decoders output each frame at once.
+  - Works with both Intel drivers: iHD (Broadwell and newer) and i965 (Ivy Bridge / Haswell, the i5-3470 target). Measured on an i5-6500, 3 x 1920x540 at 30 fps, frame in to access unit out: iHD 10.2 ms median at 36% of one core, i965 8.9 ms at 30%; the ffmpeg h264_vaapi path took 18-20 ms at about 66%.
+- **ffmpeg encoding** (libx264 fallback, and `vaapi-ffmpeg`): one process for all displays:
   - One ffmpeg process receives the whole canvas (5760x540 BGRX) once; `format`, `split` and `crop` filters cut it into one region per display.
   - **VA-API**: when `/dev/dri/renderD128` is available, the canvas is converted to `nv12` once, split, and each crop goes through `hwupload` to `h264_vaapi` (Constrained Baseline, AUD, no B-frames, every GOP starts with an IDR).
   - **Software fallback**: if VA-API is missing or ffmpeg exits within the 2 s startup probe, `libx264` (ultrafast, zerolatency, one thread per display) is used.
