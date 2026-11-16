@@ -4,4 +4,8 @@ mod config;
 mod protocol;
 mod sender;
 mod scale;
+mod frame;
+mod testpattern;
+mod logo;
+mod ffsource;
 fn main() {}
