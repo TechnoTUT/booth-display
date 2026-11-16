@@ -46,6 +46,8 @@ export interface PipelineStatus {
   is_running: boolean
   active_mode: string
   video_file: string
+  encoder?: 'vaapi' | 'vaapi-ffmpeg' | 'libx264'
+  error?: string
 }
 
 export interface NDISourceItem {

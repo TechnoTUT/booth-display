@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -32,24 +33,40 @@ func coreBinary(t *testing.T) string {
 }
 
 // TestControllerEndToEndUDPStreaming runs the controller with the real media
-// core and checks that H.264 packets reach a display over UDP.
+// core and checks that H.264 packets reach a display over UDP, with the
+// software encoder and, when a render node exists, the VA-API one.
 func TestControllerEndToEndUDPStreaming(t *testing.T) {
 	bin := coreBinary(t)
+	encoders := []string{"libx264"}
+	if _, err := os.Stat("/dev/dri/renderD128"); err == nil {
+		encoders = append(encoders, "vaapi")
+	}
+	for i, enc := range encoders {
+		t.Run(enc, func(t *testing.T) { runEndToEnd(t, bin, enc, i) })
+	}
+}
 
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 18554})
+func runEndToEnd(t *testing.T, bin, encoder string, n int) {
+	udpPort, httpPort := 18554+n, 18080+n
+	cfgEncoder := encoder
+	if encoder == "libx264" {
+		cfgEncoder = "software"
+	}
+
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: udpPort})
 	if err != nil {
 		t.Fatalf("failed to listen UDP: %v", err)
 	}
 	defer conn.Close()
 
 	cfg := &config.Config{
-		Server: config.ServerConfig{HTTPPort: 18080},
+		Server: config.ServerConfig{HTTPPort: httpPort},
 		Canvas: config.CanvasConfig{Width: 1920, Height: 540, FPS: 30},
 		Displays: []config.DisplayConfig{
-			{ID: "test-disp", Name: "Test Display", IP: "127.0.0.1", Port: 18554, Width: 1920, Height: 540},
+			{ID: "test-disp", Name: "Test Display", IP: "127.0.0.1", Port: udpPort, Width: 1920, Height: 540},
 		},
 		Media:    config.MediaConfig{DefaultMode: "testpattern"},
-		Pipeline: config.PipelineConfig{Encoder: "software"},
+		Pipeline: config.PipelineConfig{Encoder: cfgEncoder},
 	}
 
 	c := core.New(bin)
@@ -70,7 +87,7 @@ func TestControllerEndToEndUDPStreaming(t *testing.T) {
 	}()
 	time.Sleep(100 * time.Millisecond)
 
-	resp, err := http.Get("http://127.0.0.1:18080/api/config")
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/api/config", httpPort))
 	if err != nil {
 		t.Fatalf("GET /api/config failed: %v", err)
 	}
@@ -104,6 +121,9 @@ func TestControllerEndToEndUDPStreaming(t *testing.T) {
 	for {
 		st := c.Status()
 		if st.Pipeline.IsRunning && len(st.Metrics) == 1 && st.Metrics[0].PacketsSent > 0 {
+			if st.Pipeline.Encoder != encoder {
+				t.Fatalf("encoder = %q, want %q (fell back?)", st.Pipeline.Encoder, encoder)
+			}
 			if st.Metrics[0].LastSentAt.IsZero() {
 				t.Errorf("last_sent_at not set")
 			}

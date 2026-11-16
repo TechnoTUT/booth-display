@@ -12,6 +12,8 @@ type PipelineStatus struct {
 	IsRunning  bool   `json:"is_running"`
 	ActiveMode string `json:"active_mode"`
 	VideoFile  string `json:"video_file"`
+	// Encoder is the running encoder: "vaapi", "vaapi-ffmpeg" or "libx264".
+	Encoder string `json:"encoder,omitempty"`
 	// Error is set when the encoder or the NDI input stopped unexpectedly while running.
 	Error string `json:"error,omitempty"`
 }
