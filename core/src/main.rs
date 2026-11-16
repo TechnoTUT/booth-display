@@ -12,4 +12,6 @@ mod ndi_input;
 mod mixer;
 mod flv;
 mod encoder;
+mod output;
+mod preview;
 fn main() {}
