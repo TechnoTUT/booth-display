@@ -1,10 +1,14 @@
-//! One ffmpeg process reads the full-canvas raw BGRX stream once, splits it,
-//! crops one region per display and encodes each to its own H.264 stream.
-//! Every encoded stream comes back through an extra pipe (fd 3, 4, ...) as FLV
-//! and goes to the matching display sender.
+//! Picks and runs the H.264 encoder for all displays.
 //!
-//! Intel VA-API (h264_vaapi) keeps the CPU load minimal; libx264 is the
+//! VA-API driven in-process (`vaenc`) keeps the CPU load minimal; libx264,
+//! loaded at run time and also driven in-process (`x264enc`), is the
 //! automatic fallback when VA-API is missing or fails to start.
+//!
+//! `vaapi-ffmpeg` keeps the previous hardware path for comparison: one ffmpeg
+//! process reads the full-canvas raw BGRX stream once, splits it, crops one
+//! region per display and encodes each with h264_vaapi. Every encoded stream
+//! comes back through an extra pipe (fd 3, 4, ...) as FLV and goes to the
+//! matching display sender.
 
 use crate::config::{Canvas, DisplayConfig, EncoderMode, PipelineConfig};
 use crate::flv::FlvReader;
@@ -27,22 +31,21 @@ use std::time::{Duration, Instant};
 /// hundred milliseconds.
 const STARTUP_PROBE: Duration = Duration::from_secs(2);
 
-/// Builds the ffmpeg arguments for the single-process, N-output encode.
-pub fn build_args(canvas: Canvas, displays: &[DisplayConfig], vaapi: Option<&str>) -> Vec<String> {
+/// Builds the ffmpeg arguments for the single-process, N-output h264_vaapi
+/// encode on the render node `device`.
+pub fn build_args(canvas: Canvas, displays: &[DisplayConfig], device: &str) -> Vec<String> {
     let fps = canvas.fps.to_string();
     let threads = crate::scale::default_workers().to_string();
     // Convert the canvas to 4:2:0 once, before splitting, instead of once per
     // display, and let the filter graph use every core. Measured on a
     // 3-display canvas: about 8 ms lower median latency and a much tighter p90.
     // (In 4:2:0 a crop offset is rounded down to an even pixel.)
-    let pix_fmt = if vaapi.is_some() { "nv12" } else { "yuv420p" };
-    let mut fc = format!("[0:v]format={pix_fmt},split={}", displays.len());
+    let mut fc = format!("[0:v]format=nv12,split={}", displays.len());
     for i in 0..displays.len() {
         fc += &format!("[s{i}]");
     }
     for (i, d) in displays.iter().enumerate() {
-        let up = if vaapi.is_some() { ",hwupload" } else { "" };
-        fc += &format!(";[s{i}]crop={}:{}:{}:{}{up}[o{i}]", d.width, d.height, d.crop_x, d.crop_y);
+        fc += &format!(";[s{i}]crop={}:{}:{}:{},hwupload[o{i}]", d.width, d.height, d.crop_x, d.crop_y);
     }
 
     let mut a: Vec<String> = Vec::new();
@@ -50,36 +53,22 @@ pub fn build_args(canvas: Canvas, displays: &[DisplayConfig], vaapi: Option<&str
     // No "-fflags nobuffer": with a rawvideo pipe input on ffmpeg 7 it holds
     // every frame back by one frame interval (measured: 15 ms -> 49 ms).
     push(&["-hide_banner", "-loglevel", "error", "-flags", "low_delay", "-probesize", "32", "-analyzeduration", "0"]);
-    if let Some(dev) = vaapi {
-        push(&["-init_hw_device", &format!("vaapi=va:{dev}"), "-filter_hw_device", "va"]);
-    }
+    push(&["-init_hw_device", &format!("vaapi=va:{device}"), "-filter_hw_device", "va"]);
     push(&["-f", "rawvideo", "-pix_fmt", "bgr0", "-s", &format!("{}x{}", canvas.width, canvas.height)]);
     push(&["-r", &fps, "-i", "pipe:0", "-filter_threads", &threads, "-filter_complex", &fc]);
     for i in 0..displays.len() {
         push(&["-map", &format!("[o{i}]")]);
-        if vaapi.is_some() {
-            push(&[
-                "-c:v", "h264_vaapi", "-profile:v", "constrained_baseline", "-async_depth", "1",
-                "-rc_mode", "CBR", "-aud", "1", "-bf", "0", "-g", &fps,
-                // idr_interval counts I-frames, not frames: 0 makes every GOP start
-                // with an IDR (receivers resync on IDR).
-                "-idr_interval", "0",
-                // The iHD driver's CBR control starves quality when the HRD buffer is
-                // tiny; a 1M buffer lets it spend the bits. 12 Mbps x 3 displays stays
-                // well inside a 100 Mbps wired link.
-                "-b:v", "12000k", "-maxrate", "12000k", "-bufsize", "1000k",
-            ]);
-        } else {
-            push(&[
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
-                "-b:v", "4000k", "-maxrate", "4000k", "-bufsize", "400k", "-g", &fps,
-                // Receiver-friendly H.264: one slice per frame, AUD at every access
-                // unit, in-band SPS/PPS, Baseline. threads=1: frame threading delays
-                // every frame by (threads - 1) frames, and sliced threading ignores
-                // slices=1. One thread per display keeps up easily at ultrafast.
-                "-profile:v", "baseline", "-x264-params", "threads=1:slices=1:aud=1:repeat-headers=1",
-            ]);
-        }
+        push(&[
+            "-c:v", "h264_vaapi", "-profile:v", "constrained_baseline", "-async_depth", "1",
+            "-rc_mode", "CBR", "-aud", "1", "-bf", "0", "-g", &fps,
+            // idr_interval counts I-frames, not frames: 0 makes every GOP start
+            // with an IDR (receivers resync on IDR).
+            "-idr_interval", "0",
+            // The iHD driver's CBR control starves quality when the HRD buffer is
+            // tiny; a 1M buffer lets it spend the bits. 12 Mbps x 3 displays stays
+            // well inside a 100 Mbps wired link.
+            "-b:v", "12000k", "-maxrate", "12000k", "-bufsize", "1000k",
+        ]);
         // FLV, not raw h264: each tag carries its size, so a frame can be
         // forwarded as soon as it is written (see FlvReader).
         push(&["-an", "-f", "flv", "-flvflags", "no_duration_filesize", &format!("pipe:{}", 3 + i)]);
@@ -154,7 +143,7 @@ pub struct Encoder {
     running: Option<Running>,
     /// The encoder running now: "vaapi", "vaapi-ffmpeg" or "libx264".
     kind: &'static str,
-    /// The native VA-API encoder, when it runs instead of ffmpeg.
+    /// The in-process encoder (VA-API or libx264), when it runs instead of ffmpeg.
     native: Option<crate::native::NativeRun>,
     /// Why the encoder stopped although it was not asked to.
     exit_err: Arc<Mutex<Option<String>>>,
@@ -190,7 +179,7 @@ impl Encoder {
             }
             EncoderMode::FfmpegVaapi(dev) => {
                 eprintln!("[encoder] starting hardware encoder: ffmpeg h264_vaapi ({dev})");
-                match self.spawn(canvas, displays, senders, Some(&dev), subscribe()) {
+                match self.spawn(canvas, displays, senders, &dev, subscribe()) {
                     Ok(()) => {
                         self.kind = "vaapi-ffmpeg";
                         return Ok(());
@@ -200,8 +189,10 @@ impl Encoder {
             }
             EncoderMode::Software => {}
         }
-        eprintln!("[encoder] starting software encoder: libx264 (ultrafast)");
-        self.spawn(canvas, displays, senders, None, subscribe())?;
+        eprintln!("[encoder] starting software encoder: libx264, in-process");
+        let run = crate::x264enc::start(canvas, displays, senders, subscribe, self.exit_err.clone())
+            .map_err(|e| anyhow::anyhow!("software encoder failed: {e:#}"))?;
+        self.native = Some(run);
         self.kind = "libx264";
         Ok(())
     }
@@ -211,13 +202,13 @@ impl Encoder {
         canvas: Canvas,
         displays: &[DisplayConfig],
         senders: &[Arc<DisplaySender>],
-        vaapi: Option<&str>,
+        device: &str,
         frames: Receiver<Frame>,
     ) -> anyhow::Result<()> {
         *self.exit_err.lock().unwrap() = None;
         let mut pipes = OutputPipes::new(displays.len())?;
         let mut cmd = Command::new("ffmpeg");
-        cmd.args(build_args(canvas, displays, vaapi))
+        cmd.args(build_args(canvas, displays, device))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
@@ -337,37 +328,36 @@ mod tests {
     #[test]
     fn args_map_one_output_per_display() {
         let canvas = Canvas { width: 5760, height: 540, fps: 30 };
-        for vaapi in [None, Some("/dev/dri/renderD128")] {
-            let a = build_args(canvas, &displays(), vaapi);
-            let fc = &a[a.iter().position(|x| x == "-filter_complex").unwrap() + 1];
-            assert!(fc.contains("split=3[s0][s1][s2]"));
-            assert!(fc.contains("[s2]crop=1920:540:3840:0"));
-            assert_eq!(fc.contains("hwupload"), vaapi.is_some());
-            for i in 0..3 {
-                assert!(a.contains(&format!("pipe:{}", 3 + i)));
-            }
-            assert_eq!(a.contains(&"h264_vaapi".to_string()), vaapi.is_some());
+        let a = build_args(canvas, &displays(), "/dev/dri/renderD128");
+        let fc = &a[a.iter().position(|x| x == "-filter_complex").unwrap() + 1];
+        assert!(fc.contains("split=3[s0][s1][s2]"));
+        assert!(fc.contains("[s2]crop=1920:540:3840:0,hwupload"));
+        for i in 0..3 {
+            assert!(a.contains(&format!("pipe:{}", 3 + i)));
         }
+        assert_eq!(a.iter().filter(|x| *x == "h264_vaapi").count(), 3);
     }
 
     /// Measures how long a raw canvas frame takes to come back out of the real
-    /// ffmpeg command as a complete Access Unit. Opt-in, machine dependent:
+    /// ffmpeg h264_vaapi command as a complete Access Unit. Opt-in, machine
+    /// dependent:
     ///
     ///     LATENCY_TEST=1 cargo test --release encoder::tests::latency -- --nocapture
     ///
     /// LIBVA_DRIVER_NAME=i965 exercises the legacy driver used on Ivy Bridge
     /// (Core i5-3470), and LATENCY_IVY=1 masks CPU features Ivy Bridge lacks
-    /// (AVX2, FMA3, BMI) in ffmpeg and x264.
+    /// (AVX2, FMA3, BMI) in ffmpeg.
     #[test]
     fn latency() {
         if std::env::var_os("LATENCY_TEST").is_none() {
             eprintln!("set LATENCY_TEST=1 to run");
             return;
         }
-        measure(None);
-        if std::path::Path::new("/dev/dri/renderD128").exists() {
-            measure(Some("/dev/dri/renderD128"));
+        if !std::path::Path::new("/dev/dri/renderD128").exists() {
+            eprintln!("no /dev/dri/renderD128; skipping");
+            return;
         }
+        measure("/dev/dri/renderD128");
     }
 
     /// CPU seconds (user + system) of all reaped child processes so far.
@@ -379,19 +369,12 @@ mod tests {
         secs(ru.ru_utime) + secs(ru.ru_stime)
     }
 
-    fn measure(vaapi: Option<&str>) {
+    fn measure(device: &str) {
         let canvas = Canvas { width: 5760, height: 540, fps: 30 };
         let ds = displays();
-        let mut args = build_args(canvas, &ds, vaapi);
+        let mut args = build_args(canvas, &ds, device);
         if std::env::var_os("LATENCY_IVY").is_some() {
             args.splice(0..0, ["-cpuflags".into(), "mmx+mmxext+sse+sse2+sse3+ssse3+sse4.1+sse4.2+avx+cmov".into()]);
-            if let Some(i) = args.iter().position(|a| a == "-x264-params") {
-                for j in (i + 1..args.len()).step_by(1) {
-                    if args[j].starts_with("threads=1") {
-                        args[j] = format!("asm=MMX2,SSE,SSE2,SSE2Fast,SSSE3,SSE4.1,SSE4.2,AVX,LZCNT:{}", args[j]);
-                    }
-                }
-            }
         }
         let cpu0 = children_cpu();
         let mut pipes = OutputPipes::new(ds.len()).unwrap();
@@ -440,8 +423,7 @@ mod tests {
         lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let cpu = children_cpu() - cpu0;
         eprintln!(
-            "{} (ffmpeg): frame written -> access unit ready: median {:.1} ms, p90 {:.1} ms; ffmpeg CPU {:.0}% of one core",
-            vaapi.map_or("libx264", |_| "h264_vaapi"),
+            "h264_vaapi (ffmpeg): frame written -> access unit ready: median {:.1} ms, p90 {:.1} ms; ffmpeg CPU {:.0}% of one core",
             lat[lat.len() / 2],
             lat[lat.len() * 9 / 10],
             cpu / (FRAMES as f64 / 30.0) * 100.0
