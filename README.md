@@ -19,7 +19,8 @@ See [docs/](docs/) for the architecture and protocol details:
 - Go: 1.26 or later
 - Rust: stable (cargo), with a C compiler (`gcc`)
 - Node.js: 20 or later
-- FFmpeg: 6.0 or later with `libx264` (the software encoder, video-file input and the `vaapi-ffmpeg` encoder)
+- libx264 runtime library (`libx264-164` on Debian/Ubuntu, `x264-libs` from RPM Fusion): the software encoder, used when VA-API is unavailable. booth-core loads it at run time and does not bundle it.
+- FFmpeg: 6.0 or later, only for video-file and rainbow input and the `vaapi-ffmpeg` comparison encoder. Without it, test pattern, logo and NDI input and both regular encoders still work.
 - Intel VA-API driver for fast encoding at low CPU load: `intel-media-driver` (iHD) on 5th-gen Broadwell and newer, or the legacy `i965` driver on 3rd/4th-gen Ivy Bridge / Haswell (the reference target is a Core i5-3470)
 - NDI runtime (`libndi.so.6`) for NDI input: installed from the official NDI SDK for Linux with `make setup-ndi` (see [NDI runtime](#ndi-runtime))
 - uv: Python package manager (only for the client simulator)
@@ -39,8 +40,8 @@ On a new machine, in this order (each step is explained in its own section below
 #    git submodule update --init; make build also does this)
 git clone --recurse-submodules https://github.com/TechnoTUT/booth-display.git
 
-# 1. FFmpeg and the VA-API driver for your GPU
-#    → see "FFmpeg and hardware acceleration (VA-API) setup"
+# 1. VA-API driver, libx264 and (optionally) FFmpeg
+#    → see "Encoders (VA-API and libx264) setup"
 
 # 2. NDI runtime: downloads the official NDI SDK for Linux, shows its license,
 #    installs libndi.so.6 to /usr/local/lib and registers it with the dynamic linker (sudo)
@@ -65,9 +66,9 @@ Python and a `.venv` are not needed to run the controller.
 
 ---
 
-## FFmpeg and hardware acceleration (VA-API) setup
+## Encoders (VA-API and libx264) setup
 
-The media core encodes in hardware through **VA-API** on Intel integrated graphics (Intel HD / UHD Graphics), calling libva directly (no ffmpeg in between). This keeps CPU load and latency to a minimum and makes simultaneous real-time 30 fps output to several displays stable. On systems without VA-API it automatically falls back to CPU software encoding with `libx264` through FFmpeg. Only the libva runtime and the driver are needed; building needs no libva headers.
+The media core encodes in hardware through **VA-API** on Intel integrated graphics (Intel HD / UHD Graphics), calling libva directly (no ffmpeg in between). This keeps CPU load and latency to a minimum and makes simultaneous real-time 30 fps output to several displays stable. On systems without VA-API it automatically falls back to CPU software encoding with libx264, also driven in-process. Only the libva runtime, the driver and the libx264 runtime are needed; building needs no headers for either.
 
 ### 1. Install packages
 
@@ -77,14 +78,14 @@ The media core encodes in hardware through **VA-API** on Intel integrated graphi
 sudo dnf install -y epel-release
 sudo dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm
 
-# Install FFmpeg, the VA-API driver and diagnostic tools
-sudo dnf install -y ffmpeg libva-utils intel-media-driver
+# Install the VA-API driver, diagnostic tools, libx264 and FFmpeg (FFmpeg is optional)
+sudo dnf install -y libva-utils intel-media-driver x264-libs ffmpeg
 ```
 
 #### Ubuntu / Debian
 ```bash
 sudo apt update
-sudo apt install -y ffmpeg vainfo intel-media-va-driver-non-free
+sudo apt install -y vainfo intel-media-va-driver-non-free libx264-164 ffmpeg   # ffmpeg is optional
 # (for the open-source driver, use intel-media-driver or intel-media-va-driver instead)
 ```
 
@@ -102,7 +103,7 @@ sudo apt install -y i965-va-driver
 export LIBVA_DRIVER_NAME=i965
 ```
 
-`vainfo` should then list `VAProfileH264ConstrainedBaseline : VAEntrypointEncSlice`. The i965 driver prints a `Not using hybrid_drv_video.so` notice; it is harmless. If VA-API cannot start, the controller falls back to libx264, which still keeps up with three 1920x540 outputs on a Core i5-3470 class CPU.
+`vainfo` should then list `VAProfileH264ConstrainedBaseline : VAEntrypointEncSlice`. The i965 driver prints a `Not using hybrid_drv_video.so` notice; it is harmless. If VA-API cannot start, the controller falls back to libx264, which keeps up with three 1920x540 outputs on a Core i5-2400S (about 1.5 cores).
 
 ### 2. Verify
 
