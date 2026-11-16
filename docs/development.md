@@ -73,13 +73,16 @@ This document covers notes, dependencies and testing for developing and maintain
   make test
   ```
   - `core/` (Rust, `cargo test`): packet header and MTU splitting, sender frame admission and keyframe resync, FLV parsing (including a round trip through real ffmpeg encoders), the scaler and UYVY conversion, mixer transitions and frame rate, encoder arguments
-  - `controller/internal` (Go): an end-to-end test that runs the controller with a built `booth-core` and checks UDP output, metrics, preview, switching and stop. It is skipped when no `booth-core` is built; `BOOTH_CORE_BIN` points it at a binary.
+  - `core/` VA-API: the struct layouts, and an encode of a moving pattern that must decode with ffmpeg at > 35 dB luma PSNR with an IDR (with SPS/PPS) at each GOP start. Run it once more with `LIBVA_DRIVER_NAME=i965` to cover the Ivy Bridge driver; it is skipped without `/dev/dri/renderD128`. `libva-devel` (`libva-dev` on Debian) adds a check of the layouts against the installed headers.
+  - `controller/internal` (Go): an end-to-end test that runs the controller with a built `booth-core` and checks UDP output, metrics, preview, switching and stop, with libx264 and (when a render node exists) VA-API. It is skipped when no `booth-core` is built; `BOOTH_CORE_BIN` points it at a binary.
 - Opt-in measurements (machine dependent):
   ```bash
   # Scaler speed (NDI receive path)
   cargo test --release --manifest-path core/Cargo.toml scale::tests::bench -- --ignored --nocapture
-  # Canvas frame in -> access unit out, for libx264 and VA-API.
-  # LIBVA_DRIVER_NAME=i965 uses the Ivy Bridge driver, LATENCY_IVY=1 masks AVX2/FMA3/BMI.
+  # Canvas frame in -> access unit out, with CPU use. LIBVA_DRIVER_NAME=i965 uses the Ivy Bridge driver.
+  # In-process VA-API (3 displays in parallel):
+  LATENCY_TEST=1 cargo test --release --manifest-path core/Cargo.toml vaenc::tests::latency -- --nocapture
+  # ffmpeg libx264 and h264_vaapi (LATENCY_IVY=1 masks AVX2/FMA3/BMI in ffmpeg and x264):
   LATENCY_TEST=1 cargo test --release --manifest-path core/Cargo.toml encoder::tests::latency -- --nocapture
   ```
 - Running the core by hand: `controller/bin/booth-core engine` reads JSON commands on stdin (e.g. `{"id":1,"cmd":"start","mode":"testpattern"}`) and writes framed events on stdout; `booth-core discover` lists NDI sources and `booth-core version` prints the NDI runtime version.
