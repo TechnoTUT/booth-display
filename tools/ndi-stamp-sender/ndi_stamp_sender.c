@@ -1,5 +1,5 @@
-// ndi-stamp-sender: NDI test sender for TestNDIMixerLatency
-// (controller/internal/pipeline/ndi_latency_test.go).
+// ndi-stamp-sender: NDI test sender for the ndi_latency test
+// (core/src/mixer.rs).
 //
 // Sends 1920x1080 frames (UYVY, or BGRX with "bgrx") over NDI. A row of 48
 // black/white blocks, 40x60 px at rows 510-569, carries the send time: bit i
@@ -8,7 +8,7 @@
 // of the frame, so they survive the center crop onto the canvas.
 //
 // It uses the system libndi (make setup-ndi), loaded at runtime like the
-// controller does, so it builds without the NDI SDK headers:
+// media core does, so it builds without the NDI SDK headers:
 //
 //   make ndi-stamp-sender
 //   tools/ndi-stamp-sender/ndi-stamp-sender [name] [fps] [seconds, 0 = forever] [bgrx]
