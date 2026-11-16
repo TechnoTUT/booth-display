@@ -49,3 +49,6 @@ Thumbs.db
 # Python
 .venv/
 __pycache__/
+
+# Rust
+core/target/

@@ -1,0 +1,3 @@
+[submodule "moip-engine"]
+	path = moip-engine
+	url = https://github.com/TechnoTUT/moip-engine.git
