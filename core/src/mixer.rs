@@ -395,6 +395,57 @@ mod tests {
         assert!(out.iter().all(|&v| v == 255));
     }
 
+    /// Time from an NDI sender stamping a frame until the frame leaves the
+    /// mixer (the point where it goes to the encoder). Opt-in; needs a
+    /// stamping sender on the same host (same clock). From the repo root:
+    ///
+    ///     make ndi-stamp-sender
+    ///     tools/ndi-stamp-sender/ndi-stamp-sender booth-latency-test &
+    ///     NDI_LATENCY_SOURCE=booth-latency-test cargo test --release --manifest-path core/Cargo.toml ndi_latency -- --nocapture
+    ///
+    /// The sender sends 1920x1080 frames with a row of 48 black/white
+    /// 40x60 blocks at rows 510-569: block i (white = 1) is bit i of wall-clock
+    /// milliseconds mod 2^32. With the 5760x540 canvas and center crop, block i
+    /// lands at x = 120*i+60, y = 270.
+    #[test]
+    fn ndi_latency() {
+        let Ok(source) = std::env::var("NDI_LATENCY_SOURCE") else {
+            eprintln!("set NDI_LATENCY_SOURCE to a stamping NDI sender to run");
+            return;
+        };
+        let c = Canvas { width: 5760, height: 540, fps: 30 };
+        let m = Mixer::start(c, &[]).unwrap();
+        let rx = m.subscribe();
+        m.switch_source("ndi", &source, Transition::Cut, 0).unwrap();
+        let mut lat = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut last = 0u32;
+        while lat.len() < 300 && Instant::now() < deadline {
+            let Ok(f) = rx.recv_timeout(Duration::from_secs(1)) else { continue };
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u32;
+            let v = (0..32).fold(0u32, |v, i| if f[(270 * c.width + 120 * i + 60) * 4] > 128 { v | 1 << i } else { v });
+            if v == 0 || v == last {
+                continue; // no NDI frame yet, or a repeated frame
+            }
+            last = v;
+            let d = now.wrapping_sub(v) as i32;
+            if (0..=2000).contains(&d) {
+                lat.push(d as f64);
+            }
+        }
+        assert!(m.source_err().is_none(), "{:?}", m.source_err());
+        assert!(lat.len() >= 30, "only {} stamped frames received", lat.len());
+        let mut lat = lat.split_off(lat.len() / 10); // skip connection warm-up
+        lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "NDI send -> mixer output: {} frames, median {:.0} ms, p90 {:.0} ms, max {:.0} ms",
+            lat.len(),
+            lat[lat.len() / 2],
+            lat[lat.len() * 9 / 10],
+            lat[lat.len() - 1]
+        );
+    }
+
     #[test]
     fn ndi_needs_a_name() {
         let m = Mixer::start(canvas(), &[]).unwrap();
