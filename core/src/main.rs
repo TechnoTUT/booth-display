@@ -19,6 +19,7 @@ mod flv;
 mod frame;
 mod logo;
 mod mixer;
+mod nv12;
 mod ndi_input;
 mod output;
 mod preview;
