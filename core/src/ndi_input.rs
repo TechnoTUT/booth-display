@@ -83,6 +83,7 @@ pub struct SourceInfo {
 /// until the list stops changing (senders are announced one by one);
 /// afterwards the finder keeps the list current and it returns at once.
 pub fn discover() -> anyhow::Result<Vec<SourceInfo>> {
+    // Polled with short locks: the receive thread looks sources up meanwhile.
     let (mut last, age) = current_sources()?;
     let end = Instant::now() + DISCOVER_TIMEOUT.saturating_sub(age);
     let mut last_change = Instant::now();
@@ -109,11 +110,11 @@ pub fn discover() -> anyhow::Result<Vec<SourceInfo>> {
         .collect())
 }
 
-/// The source matching `name` among those currently known, without waiting:
-/// the full name or stream name, otherwise any name containing it.
+/// The source matching `name` among those currently known, without waiting
+/// (see [`ndi::find_source`]).
 fn lookup(name: &str) -> anyhow::Result<Option<ndi::Source>> {
     let (list, _) = current_sources()?;
-    Ok(list.iter().find(|s| s.matches(name)).or_else(|| list.iter().find(|s| s.name.contains(name))).cloned())
+    Ok(ndi::find_source(&list, name).cloned())
 }
 
 // ---------------------------------------------------------------------------
@@ -182,22 +183,6 @@ fn destroy_and_trim(r: ndi::Receiver) {
     if start.elapsed() > Duration::from_secs(1) {
         eprintln!("[ndi] released a receiver in {:.1}s", start.elapsed().as_secs_f64());
     }
-}
-
-/// Waits up to `timeout_ms` for a video frame and returns the newest one
-/// available plus how many older queued frames were skipped.
-fn capture_newest(r: &ndi::Receiver, timeout_ms: u32) -> Result<Option<(ndi::VideoFrame, usize)>, ()> {
-    let mut f = match r.capture(timeout_ms, true, false) {
-        ndi::Capture::Video(f) => f,
-        ndi::Capture::Error => return Err(()),
-        _ => return Ok(None),
-    };
-    let mut dropped = 0;
-    while let ndi::Capture::Video(next) = r.capture(0, true, false) {
-        f = next;
-        dropped += 1;
-    }
-    Ok(Some((f, dropped)))
 }
 
 fn fourcc_str(c: u32) -> String {
@@ -374,13 +359,14 @@ impl Worker {
                 continue;
             };
 
-            let captured = capture_newest(&recv, CAPTURE_TIMEOUT_MS);
+            let captured = recv.capture_newest_video(CAPTURE_TIMEOUT_MS);
             let now = Instant::now();
-            if captured.is_err() && !last_err {
+            let is_err = matches!(captured, ndi::NewestVideo::Error);
+            if is_err && !last_err {
                 eprintln!("[ndi] receiver reported a connection error");
             }
-            last_err = captured.is_err();
-            let Ok(Some((f, dropped))) = captured else {
+            last_err = is_err;
+            let ndi::NewestVideo::Frame(f, dropped) = captured else {
                 let silent = now - last_frame;
                 if silent < LIVE_WINDOW || now < next_check {
                     continue;
