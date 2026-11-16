@@ -9,4 +9,5 @@ mod testpattern;
 mod logo;
 mod ffsource;
 mod ndi_input;
+mod mixer;
 fn main() {}
