@@ -3,4 +3,5 @@
 mod config;
 mod protocol;
 mod sender;
+mod scale;
 fn main() {}
