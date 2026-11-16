@@ -16,6 +16,7 @@ dependencies = [
  "crossbeam-channel",
  "jpeg-encoder",
  "libc",
+ "libloading",
  "ndi",
  "serde",
  "serde_json",

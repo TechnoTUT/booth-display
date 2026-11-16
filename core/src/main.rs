@@ -27,6 +27,7 @@ mod protocol;
 mod scale;
 mod sender;
 mod testpattern;
+mod vaapi;
 
 use config::{CanvasConfig, DisplayConfig, PipelineConfig};
 use engine::Engine;
