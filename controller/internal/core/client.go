@@ -24,8 +24,8 @@ const (
 )
 
 const (
-	// commandTimeout bounds one command. Starting may wait for a VA-API
-	// startup probe and then the libx264 one (2 s each).
+	// commandTimeout bounds one command. Starting may wait for the 2 s
+	// startup probe of the vaapi-ffmpeg encoder before falling back to libx264.
 	commandTimeout = 15 * time.Second
 	// discoverTimeout bounds NDI discovery, which settles for up to 4 s.
 	discoverTimeout = 15 * time.Second

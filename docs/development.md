@@ -11,7 +11,8 @@ This document covers notes, dependencies and testing for developing and maintain
 - The moip-engine submodule: `git submodule update --init` (`make build` / `make build-core` run it when `moip-engine/` is empty)
 - Node.js: v20 or later
 - uv: Python package manager
-- FFmpeg: 6.0 or later (with `libx264`, plus `h264_vaapi` when using VA-API)
+- libx264 runtime (`libx264-164` on Debian/Ubuntu, `x264-libs` from RPM Fusion): the software encoder, loaded at run time. `libx264-dev` / `x264-devel` adds a check of the struct layouts against `x264.h`.
+- FFmpeg: 6.0 or later, for video-file and rainbow input, the `vaapi-ffmpeg` encoder and the tests that decode the encoders' output
 - Intel VA-API driver (`intel-media-driver` / `libva-utils`, etc.)
 - JDK 17 or later / Android SDK (for building the Android client)
 - NDI library: `libndi.so.6` from the official NDI SDK, installed with `make setup-ndi`. It is needed only at run time; building needs no SDK headers.
@@ -57,7 +58,7 @@ This document covers notes, dependencies and testing for developing and maintain
 
 ### (5) Hardware acceleration (VA-API) and permissions
 - At startup the controller looks for a GPU render node such as `/dev/dri/renderD128` and, if found, picks Intel VA-API hardware encoding automatically.
-- If the user lacks access to the GPU device (e.g. a permission error), or on a non-Intel GPU, it automatically falls back to CPU software encoding (`libx264` ultrafast).
+- If the user lacks access to the GPU device (e.g. a permission error), or on a non-Intel GPU, it automatically falls back to CPU software encoding (libx264 ultrafast, in-process).
 - To use VA-API as a regular user on Linux, add the user to the `render` or `video` group:
   ```bash
   sudo usermod -aG render $USER
@@ -73,6 +74,7 @@ This document covers notes, dependencies and testing for developing and maintain
   make test
   ```
   - `core/` (Rust, `cargo test`): packet header and MTU splitting, sender frame admission and keyframe resync, FLV parsing (including a round trip through real ffmpeg encoders), the scaler and UYVY conversion, mixer transitions and frame rate, encoder arguments
+  - `core/` libx264: the struct layouts (against the installed `x264.h` when present), and an encode of a moving pattern that must decode with ffmpeg at > 30 dB luma PSNR with an AUD on every access unit and an IDR (with SPS/PPS) at each GOP start. Skipped when libx264 is not installed.
   - `core/` VA-API: the struct layouts, and an encode of a moving pattern that must decode with ffmpeg at > 35 dB luma PSNR with an IDR (with SPS/PPS) at each GOP start. Run it once more with `LIBVA_DRIVER_NAME=i965` to cover the Ivy Bridge driver; it is skipped without `/dev/dri/renderD128`. `libva-devel` (`libva-dev` on Debian) adds a check of the layouts against the installed headers.
   - `controller/internal` (Go): an end-to-end test that runs the controller with a built `booth-core` and checks UDP output, metrics, preview, switching and stop, with libx264 and (when a render node exists) VA-API. It is skipped when no `booth-core` is built; `BOOTH_CORE_BIN` points it at a binary.
 - Opt-in measurements (machine dependent):
@@ -82,7 +84,9 @@ This document covers notes, dependencies and testing for developing and maintain
   # Canvas frame in -> access unit out, with CPU use. LIBVA_DRIVER_NAME=i965 uses the Ivy Bridge driver.
   # In-process VA-API (3 displays in parallel):
   LATENCY_TEST=1 cargo test --release --manifest-path core/Cargo.toml vaenc::tests::latency -- --nocapture
-  # ffmpeg libx264 and h264_vaapi (LATENCY_IVY=1 masks AVX2/FMA3/BMI in ffmpeg and x264):
+  # In-process libx264 (3 displays in parallel):
+  LATENCY_TEST=1 cargo test --release --manifest-path core/Cargo.toml x264enc::tests::latency -- --nocapture
+  # ffmpeg h264_vaapi (LATENCY_IVY=1 masks AVX2/FMA3/BMI in ffmpeg):
   LATENCY_TEST=1 cargo test --release --manifest-path core/Cargo.toml encoder::tests::latency -- --nocapture
   ```
 - Running the core by hand: `controller/bin/booth-core engine` reads JSON commands on stdin (e.g. `{"id":1,"cmd":"start","mode":"testpattern"}`) and writes framed events on stdout; `booth-core discover` lists NDI sources and `booth-core version` prints the NDI runtime version.

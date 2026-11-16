@@ -21,6 +21,7 @@ mod logo;
 mod mixer;
 mod nv12;
 mod ndi_input;
+mod native;
 mod output;
 mod preview;
 mod protocol;
@@ -29,6 +30,8 @@ mod sender;
 mod testpattern;
 mod vaapi;
 mod vaenc;
+mod x264;
+mod x264enc;
 
 use config::{CanvasConfig, DisplayConfig, PipelineConfig};
 use engine::Engine;
