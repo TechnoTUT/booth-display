@@ -26,7 +26,7 @@ flowchart TB
                 NDISource["NDI (moip-engine ndi crate, libndi)"]
             end
             CanvasMixer["Canvas mixer & transitions"]
-            Encoder["Per-display H.264 encoders<br/>(VA-API in-process / ffmpeg x264 fallback)"]
+            Encoder["Per-display H.264 encoders<br/>(VA-API / libx264, in-process)"]
             Senders["UDP senders (one per display)"]
             Preview["JPEG preview"]
         end
@@ -89,16 +89,18 @@ flowchart TB
 - Canvas mixer (`mixer.rs`):
   - Renders at the canvas rate (30 fps), driven by NDI frame arrival when NDI is active, and handles transitions (cut, crossfade, dip to black) without restarting the encoder. Blends run in 16-bit lanes so they vectorize with SSE2.
   - Frames come from a pool and are shared by reference count between subscribers (no per-subscriber copy); a subscriber that falls two frames behind loses frames instead of delaying the others.
-- Encoding (`encoder.rs`) picks the encoder from `pipeline.encoder` (`auto`/`vaapi`, `vaapi-ffmpeg`, `software`) and falls back to libx264 when VA-API cannot start. The status reports which one runs (`pipeline.encoder`).
+- Encoding (`encoder.rs`) picks the encoder from `pipeline.encoder` (`auto`/`vaapi`, `vaapi-ffmpeg`, `software`) and falls back to libx264 when VA-API cannot start. The status reports which one runs (`pipeline.encoder`). Both regular encoders run in-process on the same per-display threads (`native.rs`): one thread per display takes each canvas frame from the mixer, converts its crop to NV12 (BT.601 limited, `nv12.rs`) straight into the encoder's input and encodes it synchronously. There is no ffmpeg process and no pipe copy of the 12 MB canvas, and the displays encode in parallel.
 - **In-process VA-API** (`vaenc.rs`, `vaapi/`), the default when `/dev/dri/renderD128` exists:
   - libva (`libva.so.2`, `libva-drm.so.2`) is loaded at run time with hand-written bindings, so the build needs no libva headers; the struct layouts are tested against the libva 2.22 headers (and the installed ones when `libva-devel` is present).
-  - One thread and one VA display per display: it takes each canvas frame from the mixer, converts its crop to NV12 (BT.601 limited, `nv12.rs`) straight into the VA input surface and encodes it synchronously. There is no ffmpeg process and no pipe copy of the 12 MB canvas, and the displays encode in parallel.
+  - One VA display and encoder per display; the crop is converted straight into the VA input surface.
   - Constrained Baseline, one slice per frame, IDR at the start of every one-second GOP, P-frames with one reference, CBR 12 Mbps with a 1 Mbit HRD buffer, AUD on every access unit. The driver writes slice headers; SPS and PPS are written by booth-core (`vaapi/headers.rs`) and put in front of every IDR, because the drivers emit none without packed headers. The SPS signals no frame reordering, so decoders output each frame at once.
   - Works with both Intel drivers: iHD (Broadwell and newer) and i965 (Ivy Bridge / Haswell, the i5-3470 target). Measured on an i5-6500, 3 x 1920x540 at 30 fps, frame in to access unit out: iHD 10.2 ms median at 36% of one core, i965 8.9 ms at 30%; the ffmpeg h264_vaapi path took 18-20 ms at about 66%.
-- **ffmpeg encoding** (libx264 fallback, and `vaapi-ffmpeg`): one process for all displays:
-  - One ffmpeg process receives the whole canvas (5760x540 BGRX) once; `format`, `split` and `crop` filters cut it into one region per display.
-  - **VA-API**: when `/dev/dri/renderD128` is available, the canvas is converted to `nv12` once, split, and each crop goes through `hwupload` to `h264_vaapi` (Constrained Baseline, AUD, no B-frames, every GOP starts with an IDR).
-  - **Software fallback**: if VA-API is missing or ffmpeg exits within the 2 s startup probe, `libx264` (ultrafast, zerolatency, one thread per display) is used.
+- **In-process libx264** (`x264enc.rs`, `x264/`), the software encoder and the fallback:
+  - libx264 is loaded at run time (`libx264.so.<build>`, looking up the versioned `x264_encoder_open_<build>`), so the build needs neither the library nor its headers, and booth-core does not ship this GPL library. `x264_param_t` is only touched through its stable leading fields; every other setting goes through `x264_param_parse` by name. The layouts are tested against the installed `x264.h` when present.
+  - ultrafast / zerolatency, Baseline, one thread and one slice per display, no lookahead (one access unit out per frame in), IDR at the start of every one-second GOP, AUD and in-band SPS/PPS, 4 Mbps with a 400 kbit VBV buffer.
+  - Measured on an i5-2400S, 3 x 1920x540 at 30 fps: 17.2 ms median, 18.0 ms p90, 152% of one core including the NV12 conversion. The previous ffmpeg libx264 process took 24.8 ms median, 27.4 ms p90 at 165% (not counting the pipe writes).
+- **ffmpeg h264_vaapi** (`vaapi-ffmpeg`, kept for comparison): one process for all displays:
+  - One ffmpeg process receives the whole canvas (5760x540 BGRX) once, converts it to `nv12`, and `split` and `crop` filters cut it into one region per display; each crop goes through `hwupload` to `h264_vaapi` (Constrained Baseline, AUD, no B-frames, every GOP starts with an IDR). If ffmpeg exits within the 2 s startup probe, the in-process libx264 encoder takes over.
   - Each display's output is muxed as FLV and passed through an extra pipe (`pipe:3`, `pipe:4`, ...). FLV carries the size of every frame, so an access unit is forwarded as soon as it is complete (`flv.rs`).
 - Packetization and UDP output (`sender.rs`, `protocol.rs`): each access unit is converted to Annex-B, split into packets with the 16-byte header, and queued for a send thread. A frame is queued whole or dropped whole, and after a drop P-frames are skipped until the next keyframe.
 - Preview (`preview.rs`): every canvas frame is thinned to 15 fps, downscaled to 1280 px wide and JPEG-encoded in-process.
