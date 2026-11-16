@@ -105,6 +105,12 @@ export LIBVA_DRIVER_NAME=i965
 
 `vainfo` should then list `VAProfileH264ConstrainedBaseline : VAEntrypointEncSlice`. The i965 driver prints a `Not using hybrid_drv_video.so` notice; it is harmless. If VA-API cannot start, the controller falls back to libx264, which keeps up with three 1920x540 outputs on a Core i5-2400S (about 1.5 cores).
 
+> **Ivy Bridge (the i5-3470 target) has not been tested yet.** VA-API with the i965 driver has run on Skylake and Sandy Bridge.
+
+### VT-d (IOMMU) must be off for the integrated GPU
+
+On a Sandy Bridge machine with VT-d enabled, VA-API encoding for three displays froze the whole machine within seconds, leaving nothing in the logs. Turn VT-d off in the BIOS, or keep it and exclude the GPU with the kernel parameter `intel_iommu=igfx_off` (not tested yet). `sudo dmesg | grep 'VT-d active for gfx'` prints nothing when the GPU is excluded.
+
 ### 2. Verify
 
 ```bash
