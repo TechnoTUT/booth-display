@@ -4,6 +4,7 @@
 //! in moip-engine's ndi crate: building needs no libva headers, and a machine
 //! without VA-API still runs (the encoder falls back to libx264).
 
+pub mod h264;
 mod headers;
 pub mod sys;
 
