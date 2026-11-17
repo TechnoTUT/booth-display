@@ -11,8 +11,8 @@ android {
         applicationId = "com.technotut.boothdisplay"
         minSdk = 25  // Android 7.1 (LG LD290EJS-FPN1 native OS)
         targetSdk = 34
-        versionCode = 11
-        versionName = "1.0.10"
+        versionCode = 12
+        versionName = "1.1.0" // protocol version 2
     }
 
     buildTypes {
@@ -36,8 +36,14 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    testOptions {
+        // The protocol classes under test use no Android APIs; stubs return defaults just in case.
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
     // Only standard Android SDK & minimal core libraries for smallest footprint (< 5MB APK)
+    testImplementation("junit:junit:4.13.2")
 }

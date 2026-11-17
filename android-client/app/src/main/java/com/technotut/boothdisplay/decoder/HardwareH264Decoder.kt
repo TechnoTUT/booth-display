@@ -3,37 +3,54 @@ package com.technotut.boothdisplay.decoder
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.Process
 import android.util.Log
 import android.view.Surface
-import java.nio.ByteBuffer
+import com.technotut.boothdisplay.protocol.ClockSync
+import com.technotut.boothdisplay.protocol.Frame
+import com.technotut.boothdisplay.protocol.FramePool
+import com.technotut.boothdisplay.protocol.StreamStats
 
 /**
- * Ultra-low latency H.264 hardware decoder using Android MediaCodec.
- * Directly renders decoded frames onto the target Surface (SurfaceView)
- * without intermediate Bitmaps, preventing GC pauses and OOM.
+ * H.264 hardware decoder (MediaCodec, asynchronous mode) rendering straight
+ * onto a Surface.
+ *
+ * The receive thread hands over complete access units with [submit]. Codec
+ * callbacks run on their own thread: an access unit goes into the first free
+ * input buffer, and every decoded picture is rendered the moment it comes
+ * out. Nothing waits with a timeout or polls.
+ *
+ * At most [MAX_PENDING] access units wait for an input buffer. Beyond that
+ * the decoder is falling behind, so the waiting ones are discarded and the
+ * receiver waits for a keyframe, instead of showing the picture later and
+ * later.
  */
 class HardwareH264Decoder(
-    private val width: Int = 1920,
-    private val height: Int = 540
+    private val width: Int,
+    private val height: Int,
+    private val pool: FramePool,
+    private val stats: StreamStats,
+    private val clock: ClockSync,
 ) {
     companion object {
         private const val TAG = "HardwareH264Decoder"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
-        private const val TIMEOUT_US = 10000L
+        const val MAX_PENDING = 3
 
-        private const val NAL_TYPE_NON_IDR = 1
-        private const val NAL_TYPE_IDR = 5
-        private const val NAL_TYPE_SEI = 6
-        private const val NAL_TYPE_SPS = 7
-        private const val NAL_TYPE_PPS = 8
+        /** Decode-speed hint: well above 30 fps so the codec runs at full clock. */
+        private const val OPERATING_RATE = 120
+
+        /** Frames in flight inside the codec that can be traced back. */
+        private const val META_SLOTS = 32
     }
 
     private val lock = Any()
-    private var codec: MediaCodec? = null
-    @Volatile
-    private var isConfigured = false
-    private var drainThread: Thread? = null
+
+    // Guarded by lock.
+    private var session: Session? = null
+    private val pending = ArrayDeque<Frame>(MAX_PENDING + 1)
 
     @Volatile
     var renderedFrameCount: Long = 0L
@@ -43,225 +60,202 @@ class HardwareH264Decoder(
     var lastError: String? = null
         private set
 
+    /** The configured size and codec, for the OSD. */
     @Volatile
-    var lastNalType: String = "None"
+    var description: String = "-"
         private set
 
-    // Parameter sets cached for Access Unit reassembly
-    private var spsBuffer: ByteArray? = null
-    private var ppsBuffer: ByteArray? = null
-    private var hasReceivedKeyframe = false
+    /**
+     * One configured codec and its callback thread. Everything but [pending]
+     * belongs to the callback thread; a session that is no longer current
+     * does nothing, so a stopping codec cannot touch its successor.
+     */
+    private inner class Session(val codec: MediaCodec) : MediaCodec.Callback() {
+        val thread = HandlerThread("DecoderCallbacks", Process.THREAD_PRIORITY_URGENT_DISPLAY).apply { start() }
+        val handler = Handler(thread.looper)
+        val feedRunnable = Runnable { feed() }
+
+        private val freeInputs = ArrayDeque<Int>(16)
+        private val metaPts = LongArray(META_SLOTS) { -1L }
+        private val metaComplete = LongArray(META_SLOTS)
+        private val metaQueued = LongArray(META_SLOTS)
+        private val metaSenderTs = LongArray(META_SLOTS)
+        private var metaNext = 0
+        private var lastPtsUs = 0L
+
+        override fun onInputBufferAvailable(mc: MediaCodec, index: Int) {
+            freeInputs.addLast(index)
+            feed()
+        }
+
+        override fun onOutputBufferAvailable(mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+            val now = System.nanoTime()
+            try {
+                mc.releaseOutputBuffer(index, true)
+            } catch (e: IllegalStateException) {
+                return // released while stopping
+            }
+            renderedFrameCount++
+            for (slot in 0 until META_SLOTS) {
+                if (metaPts[slot] != info.presentationTimeUs) continue
+                val e2e = clock.elapsedSince(metaSenderTs[slot], now / 1000L)
+                stats.frameDecoded(now, metaComplete[slot], metaQueued[slot], e2e)
+                metaPts[slot] = -1L
+                break
+            }
+        }
+
+        override fun onError(mc: MediaCodec, e: MediaCodec.CodecException) {
+            lastError = "Codec error: ${e.diagnosticInfo}"
+            Log.e(TAG, "MediaCodec error (recoverable=${e.isRecoverable}, transient=${e.isTransient})", e)
+        }
+
+        override fun onOutputFormatChanged(mc: MediaCodec, format: MediaFormat) {
+            Log.i(TAG, "Output format: $format")
+        }
+
+        /** Moves waiting access units into free input buffers. */
+        fun feed() {
+            while (true) {
+                val index = freeInputs.firstOrNull() ?: return
+                val frame = synchronized(lock) {
+                    if (session !== this) return
+                    pending.removeFirstOrNull()
+                } ?: return
+                try {
+                    val buf = codec.getInputBuffer(index)
+                    if (buf == null || frame.size > buf.capacity()) {
+                        lastError = "Frame too big: ${frame.size} > ${buf?.capacity()}"
+                        Log.e(TAG, lastError!!)
+                        continue
+                    }
+                    freeInputs.removeFirst()
+                    buf.clear()
+                    buf.put(frame.data, 0, frame.size)
+                    // Strictly increasing timestamps; they also find the frame again on output.
+                    val pts = maxOf(frame.completeNs / 1000L, lastPtsUs + 1)
+                    lastPtsUs = pts
+                    val slot = metaNext
+                    metaNext = (metaNext + 1) % META_SLOTS
+                    metaPts[slot] = pts
+                    metaComplete[slot] = frame.completeNs
+                    metaQueued[slot] = System.nanoTime()
+                    metaSenderTs[slot] = frame.senderTimestamp
+                    val flags = if (frame.isKeyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                    codec.queueInputBuffer(index, 0, frame.size, pts, flags)
+                } catch (e: IllegalStateException) {
+                    return // stopped meanwhile
+                } finally {
+                    pool.release(frame)
+                }
+            }
+        }
+
+        fun release() {
+            try {
+                codec.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping decoder: ${e.message}")
+            }
+            codec.release()
+            thread.quitSafely()
+        }
+    }
 
     fun init(surface: Surface) {
         synchronized(lock) {
-            stop()
-
+            stopLocked()
+            var s: Session? = null
             try {
-                val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
-                    // Crucial: Allocate sufficient input buffer to prevent BufferOverflowException
-                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1024 * 1024)
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        try {
-                            setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-                        } catch (e: Exception) {
-                            Log.w(TAG, "KEY_LOW_LATENCY not supported: ${e.message}")
-                        }
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        try {
-                            setInteger(MediaFormat.KEY_PRIORITY, 0)
-                        } catch (e: Exception) {
-                            Log.w(TAG, "KEY_PRIORITY not supported: ${e.message}")
-                        }
-                    }
-                }
-
-                val decoder = MediaCodec.createDecoderByType(MIME_TYPE)
-                try {
-                    decoder.configure(format, surface, null, 0)
-                } catch (e: Exception) {
-                    // Height 540 is not a multiple of 16 (16 * 34 = 544). Try 16-aligned fallback.
-                    Log.w(TAG, "Configure with ${width}x${height} failed (${e.message}), trying 16-aligned height 544...")
-                    val alignedFormat = MediaFormat.createVideoFormat(MIME_TYPE, width, 544).apply {
-                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1024 * 1024)
-                    }
-                    decoder.configure(alignedFormat, surface, null, 0)
-                }
-                decoder.start()
-
-                codec = decoder
-                isConfigured = true
-                hasReceivedKeyframe = false
+                s = Session(MediaCodec.createDecoderByType(MIME_TYPE))
+                configure(s, surface)
+                session = s
                 renderedFrameCount = 0L
                 lastError = null
-
-                // Start dedicated background output drain thread for immediate zero-latency rendering
-                startDrainThread(decoder)
-
-                Log.i(TAG, "Hardware H.264 decoder successfully started ($width x $height)")
+                s.codec.start()
+                Log.i(TAG, "Decoder started: $description")
             } catch (e: Exception) {
                 lastError = "Codec init fail: ${e.message}"
                 Log.e(TAG, "Failed to start MediaCodec: ${e.message}", e)
-                stop()
+                session = null
+                s?.release()
             }
         }
     }
 
-    private fun startDrainThread(decoder: MediaCodec) {
-        val bufferInfo = MediaCodec.BufferInfo()
-        drainThread = Thread({
+    /**
+     * Tries the low-latency hints first, then a plain format, then the
+     * 16-aligned height (540 is not a multiple of 16) for decoders that need it.
+     */
+    private fun configure(s: Session, surface: Surface) {
+        val attempts = listOf(
+            Triple(width, height, true),
+            Triple(width, height, false),
+            Triple(width, (height + 15) / 16 * 16, false),
+        )
+        var last: Exception? = null
+        for ((w, h, hints) in attempts) {
             try {
-                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                s.codec.setCallback(s, s.handler)
+                s.codec.configure(format(w, h, hints), surface, null, 0)
+                description = "${s.codec.name} ${w}x$h" + if (hints) " (low-latency hints)" else ""
+                return
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to set URGENT_DISPLAY priority: ${e.message}")
+                Log.w(TAG, "configure ${w}x$h (hints=$hints) failed: ${e.message}")
+                last = e
+                s.codec.reset()
             }
-            Log.i(TAG, "MediaCodec drain thread started")
-            while (isConfigured) {
-                try {
-                    val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 2000L)
-                    when {
-                        outIndex >= 0 -> {
-                            // Render frame directly and immediately to SurfaceView with present timestamp
-                            try {
-                                decoder.releaseOutputBuffer(outIndex, System.nanoTime())
-                                renderedFrameCount++
-                            } catch (e: Exception) {
-                                if (isConfigured) lastError = "Release err: ${e.message}"
-                            }
-                        }
-                        outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                            Log.i(TAG, "MediaCodec output format changed: ${decoder.outputFormat}")
-                        }
-                        outIndex == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> {
-                            Log.i(TAG, "MediaCodec output buffers changed")
-                        }
-                        outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                            // Timeout, continue polling
-                        }
-                    }
-                } catch (e: Exception) {
-                    if (!isConfigured) break
-                    lastError = "Drain err: ${e.message}"
-                    Log.w(TAG, "Drain output loop error: ${e.message}")
-                }
-            }
-            Log.i(TAG, "MediaCodec drain thread stopped")
-        }, "MediaCodecDrainThread").apply {
-            priority = Thread.MAX_PRIORITY
-            start()
+        }
+        throw last!!
+    }
+
+    private fun format(w: Int, h: Int, hints: Boolean) = MediaFormat.createVideoFormat(MIME_TYPE, w, h).apply {
+        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, pool.frameCapacity)
+        if (!hints) return@apply
+        // Realtime priority and a high operating rate keep the codec clocked up.
+        setInteger(MediaFormat.KEY_PRIORITY, 0)
+        setInteger(MediaFormat.KEY_OPERATING_RATE, OPERATING_RATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
     }
 
     /**
-     * Returns the first NAL unit of [type] found in the Annex-B buffer
-     * (including its start code), or null if absent.
+     * Takes a complete access unit (from the receive thread); the frame goes
+     * back to the pool once it is in the codec or discarded. Returns false
+     * when the decoder was too far behind: the waiting access units and this
+     * one were discarded and the caller must wait for a keyframe. A keyframe
+     * is always taken, replacing whatever was waiting.
      */
-    private fun extractNal(data: ByteArray, type: Int): ByteArray? {
-        var start = -1
-        var i = 0
-        while (i + 3 < data.size) {
-            val sc4 = data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
-                data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()
-            val sc3 = data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()
-            if (sc4 || sc3) {
-                val hdr = if (sc4) 4 else 3
-                if (start >= 0) return data.copyOfRange(start, i)
-                if (i + hdr < data.size && (data[i + hdr].toInt() and 0x1F) == type) {
-                    start = i
-                }
-                i += hdr
-            } else {
-                i++
-            }
-        }
-        return if (start >= 0) data.copyOfRange(start, data.size) else null
-    }
-
-    /**
-     * [data] is one complete Access Unit (all NALs of one frame: AUD, optional
-     * SPS/PPS/SEI, and every slice), exactly as framed by the controller.
-     * MediaCodec needs a whole picture per input buffer.
-     */
-    fun decodeFrame(data: ByteArray, isKeyframe: Boolean, timestampMs: Long) {
+    fun submit(frame: Frame): Boolean {
         synchronized(lock) {
-            val decoder = codec ?: return
-            if (!isConfigured) return
-
-            val sps = extractNal(data, NAL_TYPE_SPS)
-            val pps = extractNal(data, NAL_TYPE_PPS)
-            if (sps != null) spsBuffer = sps
-            if (pps != null) ppsBuffer = pps
-
-            val hasIdr = extractNal(data, NAL_TYPE_IDR) != null
-            val ptsUs = System.nanoTime() / 1000L
-
-            if (hasIdr || isKeyframe) {
-                hasReceivedKeyframe = true
-                lastNalType = "IDR-AU (${data.size}B)"
-                // Make sure parameter sets travel with the keyframe even if the encoder omitted them
-                val cachedSps = spsBuffer
-                val cachedPps = ppsBuffer
-                val payload = if (sps == null && pps == null && cachedSps != null && cachedPps != null) {
-                    cachedSps + cachedPps + data
-                } else {
-                    data
-                }
-                queueInput(decoder, payload, ptsUs, MediaCodec.BUFFER_FLAG_KEY_FRAME)
-            } else {
-                if (!hasReceivedKeyframe) return // Drop P-frames until the first keyframe
-                lastNalType = "P-AU (${data.size}B)"
-                queueInput(decoder, data, ptsUs, 0)
+            val s = session
+            if (s == null) {
+                pool.release(frame)
+                return true
             }
-        }
-    }
-
-    private fun queueInput(decoder: MediaCodec, data: ByteArray, presentationTimeUs: Long, flags: Int) {
-        try {
-            val inIndex = decoder.dequeueInputBuffer(TIMEOUT_US)
-            if (inIndex >= 0) {
-                val inputBuffer: ByteBuffer? = decoder.getInputBuffer(inIndex)
-                inputBuffer?.clear()
-                if (inputBuffer != null && data.size > inputBuffer.capacity()) {
-                    lastError = "Frame too big: ${data.size} > ${inputBuffer.capacity()}"
-                    Log.e(TAG, lastError!!)
-                    return
+            if (pending.size >= MAX_PENDING) {
+                stats.backlogDropped(pending.size)
+                while (pending.isNotEmpty()) pool.release(pending.removeFirst())
+                if (!frame.isKeyframe) {
+                    stats.backlogDropped(1)
+                    pool.release(frame)
+                    return false
                 }
-                inputBuffer?.put(data)
-                decoder.queueInputBuffer(inIndex, 0, data.size, presentationTimeUs, flags)
-                if (lastError == "Input buf full") {
-                    lastError = null
-                }
-            } else {
-                lastError = "Input buf full"
-                Log.w(TAG, "Input buffer full, dropping frame")
             }
-        } catch (e: Exception) {
-            lastError = "Queue err: ${e.message}"
-            Log.w(TAG, "Queue input error: ${e.message}")
+            pending.addLast(frame)
+            s.handler.post(s.feedRunnable)
+            return true
         }
     }
 
     fun stop() {
-        synchronized(lock) {
-            isConfigured = false
-            hasReceivedKeyframe = false
-            spsBuffer = null
-            ppsBuffer = null
+        synchronized(lock) { stopLocked() }
+    }
 
-            drainThread?.interrupt()
-            drainThread = null
-
-            try {
-                codec?.stop()
-                codec?.release()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error stopping decoder: ${e.message}")
-            } finally {
-                codec = null
-            }
-        }
+    private fun stopLocked() {
+        session?.release()
+        session = null
+        while (pending.isNotEmpty()) pool.release(pending.removeFirst())
     }
 }
-
-

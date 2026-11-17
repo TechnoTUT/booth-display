@@ -126,3 +126,12 @@ flowchart TB
   - Receive UDP packets and reassemble fragments
   - Hardware H.264 decoding with MediaCodec (using the Cortex-A17 VPU)
   - Full-screen rendering to a SurfaceView (immersive mode)
+- Receive thread (`receiver/UdpStreamReceiver.kt`, protocol version 2):
+  - One reused header object and a pool of eight 1 MB frame buffers (`protocol/Frame.kt`): each fragment is copied straight to its place in its frame (`protocol/FrameAssembler.kt`), so the receive path allocates nothing per packet or frame.
+  - Loss (an incomplete frame, a gap in the sequence numbers) makes it skip frames up to the next keyframe and send KEYFRAME_REQUEST, repeated every 250 ms while it waits. It also waits for a keyframe at start, so the first picture comes as soon as the controller answers.
+  - It sends a PING once a second; the PONGs give the controller clock offset (`protocol/ClockSync.kt`).
+- Decoder (`decoder/HardwareH264Decoder.kt`): MediaCodec in asynchronous mode with its callbacks on a dedicated thread. A complete access unit goes into the first free input buffer and every decoded picture is rendered at once; nothing waits with a timeout or polls. At most three access units wait for an input buffer; beyond that they are discarded and the receiver waits for a keyframe, instead of the picture falling further and further behind. The codec is configured with realtime priority and a high operating rate (and `KEY_LOW_LATENCY` on Android 11+), falling back to a plain format and then to a 16-aligned height.
+- Measurement (`protocol/StreamStats.kt`): every second the app logs one line under the `BoothStats` tag and shows it in the OSD (tap the screen):
+  - `fps`, and `stalls`: gaps of more than 50 ms between decoded pictures (stutter)
+  - `e2e`, `net`, `wait`, `dec` as median/p90/max in ms: canvas frame reaching the controller's encoder to decoded picture out; first to last fragment received; complete to handed to the decoder; handed to the decoder to decoded picture out. Rendering at the next vsync and the panel come on top of `e2e`.
+  - Totals since start: `lost` frames, `skipped` frames while waiting for a keyframe, `kfreq` keyframe requests sent, `backlog` frames discarded because the decoder fell behind; `rtt` to the controller.
