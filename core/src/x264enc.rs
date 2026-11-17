@@ -65,4 +65,24 @@ mod tests {
         eprintln!("encoder: {}", encoders[0].describe());
         crate::native::tests::measure_latency("in-process libx264", encoders);
     }
+
+    /// Highest sustained frame rate, see native::tests::measure_throughput.
+    /// Opt-in, machine dependent:
+    ///
+    ///     THROUGHPUT_TEST=1 cargo test --release x264enc::tests::throughput -- --nocapture
+    ///
+    /// THROUGHPUT_DISPLAYS=1..3 sets the number of parallel encoders (default 3).
+    #[test]
+    fn throughput() {
+        if std::env::var_os("THROUGHPUT_TEST").is_none() {
+            eprintln!("set THROUGHPUT_TEST=1 to run");
+            return;
+        }
+        let canvas = Canvas { width: 5760, height: 540, fps: 30 };
+        let d = DisplayConfig { width: 1920, height: 540, ..Default::default() };
+        let n = crate::native::tests::throughput_displays();
+        let encoders: Vec<Encoder> = (0..n).map(|_| Encoder::new(params(canvas, &d)).expect("libx264 encoder")).collect();
+        eprintln!("encoder: {}", encoders[0].describe());
+        crate::native::tests::measure_throughput("in-process libx264", encoders);
+    }
 }

@@ -88,5 +88,9 @@ This document covers notes, dependencies and testing for developing and maintain
   LATENCY_TEST=1 cargo test --release --manifest-path core/Cargo.toml x264enc::tests::latency -- --nocapture
   # ffmpeg h264_vaapi (LATENCY_IVY=1 masks AVX2/FMA3/BMI in ffmpeg):
   LATENCY_TEST=1 cargo test --release --manifest-path core/Cargo.toml encoder::tests::latency -- --nocapture
+  # Highest sustained frame rate: encoders run back to back with no 30 fps pacing.
+  # THROUGHPUT_DISPLAYS=1..3 sets the number of parallel encoders (default 3).
+  THROUGHPUT_TEST=1 cargo test --release --manifest-path core/Cargo.toml vaenc::tests::throughput -- --nocapture
+  THROUGHPUT_TEST=1 cargo test --release --manifest-path core/Cargo.toml x264enc::tests::throughput -- --nocapture
   ```
 - Running the core by hand: `controller/bin/booth-core engine` reads JSON commands on stdin (e.g. `{"id":1,"cmd":"start","mode":"testpattern"}`) and writes framed events on stdout; `booth-core discover` lists NDI sources and `booth-core version` prints the NDI runtime version.
