@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # GitHub-hosted runners have no Intel GPU: the VA-API tests skip themselves,
+    # and the throughput numbers are the runner's CPU, not the booth hardware.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install libx264 and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libx264-164 ffmpeg
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: controller/frontend/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: controller/go.mod
+          cache-dependency-path: controller/go.sum
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix controller/frontend
+
+      # The Go controller embeds the frontend build, so it is built first.
+      - name: Build and test
+        run: make build-frontend test
+
+      # Report only: shared runners are too noisy to fail a build on a number.
+      - name: Encoder throughput
+        env:
+          THROUGHPUT_TEST: "1"
+        run: |
+          {
+            echo "### Encoder throughput (unpaced, 1920x540, runner CPU: $(nproc) x $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs))"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for n in 1 3; do
+            THROUGHPUT_DISPLAYS=$n cargo test --release --manifest-path core/Cargo.toml \
+              -- --exact x264enc::tests::throughput vaenc::tests::throughput --nocapture 2>&1 | tee throughput.log
+            grep -E 'unpaced|skipping' throughput.log >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
