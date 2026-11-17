@@ -168,4 +168,65 @@ pub mod tests {
             cpu.as_secs_f64() / wall.as_secs_f64() * 100.0
         );
     }
+
+    /// Number of displays for the throughput tests: `THROUGHPUT_DISPLAYS`
+    /// (1 to 3, the displays of the default canvas), 3 when unset.
+    pub fn throughput_displays() -> usize {
+        match std::env::var("THROUGHPUT_DISPLAYS") {
+            Err(_) => 3,
+            Ok(v) => match v.parse() {
+                Ok(n @ 1..=3) => n,
+                _ => panic!("THROUGHPUT_DISPLAYS must be 1, 2 or 3, got {v:?}"),
+            },
+        }
+    }
+
+    /// Highest frame rate the encoders sustain: each encoder gets its own
+    /// 1920x540 crop of the default canvas and encodes frames back to back,
+    /// with no 30 fps pacing, all encoders in parallel. Frames come from a
+    /// small pre-built pool so frame generation is not measured. Prints one
+    /// summary line headed by `label`: frames per second per display and the
+    /// encode threads' CPU time (NV12 conversion included).
+    pub fn measure_throughput<E: FrameEncoder>(label: &str, encoders: Vec<E>) {
+        const FRAMES: usize = 300;
+        let canvas = Canvas { width: 5760, height: 540, fps: 30 };
+        assert!(encoders.len() * 1920 <= canvas.width);
+        let pool: Arc<Vec<Vec<u8>>> = Arc::new(
+            (0..8)
+                .map(|i| {
+                    let mut frame = vec![0u8; canvas.frame_size()];
+                    for (j, px) in frame.chunks_exact_mut(4).enumerate() {
+                        px[0] = (i * 3 + (j >> 2)) as u8;
+                        px[1] = (i + (j >> 8)) as u8;
+                    }
+                    frame
+                })
+                .collect(),
+        );
+        let n = encoders.len();
+        let start = Instant::now();
+        let threads: Vec<_> = encoders
+            .into_iter()
+            .enumerate()
+            .map(|(d, mut enc)| {
+                let pool = pool.clone();
+                std::thread::spawn(move || {
+                    let cpu0 = thread_cpu();
+                    for i in 0..FRAMES {
+                        let f = &pool[i % pool.len()];
+                        enc.encode_frame(&mut |planes| bgrx_to_nv12(f, canvas.width * 4, d * 1920, 0, 540, planes))
+                            .unwrap();
+                    }
+                    thread_cpu() - cpu0
+                })
+            })
+            .collect();
+        let cpu: Duration = threads.into_iter().map(|t| t.join().unwrap()).sum();
+        let wall = start.elapsed().as_secs_f64();
+        eprintln!(
+            "{label}, {n} display(s) unpaced: {:.1} fps per display; encode threads CPU {:.0}% of one core",
+            FRAMES as f64 / wall,
+            cpu.as_secs_f64() / wall * 100.0
+        );
+    }
 }
