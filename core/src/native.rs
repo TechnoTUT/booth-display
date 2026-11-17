@@ -8,30 +8,30 @@
 use crate::config::{Canvas, DisplayConfig};
 use crate::frame::Frame;
 use crate::nv12::{bgrx_to_nv12, Nv12Planes};
-use crate::protocol::PAYLOAD_H264;
+use crate::protocol::{now_us, PAYLOAD_H264};
 use crate::sender::DisplaySender;
 use anyhow::{bail, Result};
 use crossbeam_channel::{bounded, select, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
 
 /// An H.264 encoder for one display, driven by its own thread.
 pub trait FrameEncoder: Send + 'static {
-    /// Fills the input picture through `fill` and encodes it. Returns the
-    /// Annex-B access unit (possibly empty) and whether it is an IDR.
-    fn encode_frame(&mut self, fill: &mut dyn FnMut(&mut Nv12Planes)) -> Result<(&[u8], bool)>;
+    /// Fills the input picture through `fill` and encodes it, as an IDR when
+    /// `force_idr`. Returns the Annex-B access unit (possibly empty) and
+    /// whether it is an IDR.
+    fn encode_frame(&mut self, fill: &mut dyn FnMut(&mut Nv12Planes), force_idr: bool) -> Result<(&[u8], bool)>;
 }
 
 impl FrameEncoder for crate::vaapi::h264::Encoder {
-    fn encode_frame(&mut self, fill: &mut dyn FnMut(&mut Nv12Planes)) -> Result<(&[u8], bool)> {
-        self.encode(fill)
+    fn encode_frame(&mut self, fill: &mut dyn FnMut(&mut Nv12Planes), force_idr: bool) -> Result<(&[u8], bool)> {
+        self.encode(fill, force_idr)
     }
 }
 
 impl FrameEncoder for crate::x264::Encoder {
-    fn encode_frame(&mut self, fill: &mut dyn FnMut(&mut Nv12Planes)) -> Result<(&[u8], bool)> {
-        self.encode(fill)
+    fn encode_frame(&mut self, fill: &mut dyn FnMut(&mut Nv12Planes), force_idr: bool) -> Result<(&[u8], bool)> {
+        self.encode(fill, force_idr)
     }
 }
 
@@ -70,15 +70,17 @@ pub fn spawn<E: FrameEncoder>(
         let (id, x0, y0, h) = (d.id.clone(), d.crop_x as usize, d.crop_y as usize, d.height as usize);
         let stride = canvas.width * 4;
         threads.push(std::thread::Builder::new().name(format!("{label}-{id}")).spawn(move || {
-            let start = Instant::now();
             loop {
                 let f = select! {
                     recv(frames) -> f => match f { Ok(f) => f, Err(_) => return },
                     recv(stop) -> _ => return,
                 };
-                match enc.encode_frame(&mut |planes| bgrx_to_nv12(&f, stride, x0, y0, h, planes)) {
+                // The frame's timestamp: when the canvas frame reached the encoder.
+                let ts = now_us();
+                let force_idr = sender.take_keyframe_request();
+                match enc.encode_frame(&mut |planes| bgrx_to_nv12(&f, stride, x0, y0, h, planes), force_idr) {
                     Ok((au, _)) if au.is_empty() => {}
-                    Ok((au, key)) => sender.send_frame(au, PAYLOAD_H264, key, start.elapsed().as_millis() as u32),
+                    Ok((au, key)) => sender.send_frame(au, PAYLOAD_H264, key, ts),
                     Err(e) => {
                         let msg = format!("encoder stopped: display {id}: {e:#}");
                         eprintln!("[encoder] {msg}");
@@ -105,7 +107,7 @@ impl Drop for NativeRun {
 pub mod tests {
     use super::*;
     use crossbeam_channel::bounded;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// CPU time (user + system) of the calling thread.
     pub fn thread_cpu() -> Duration {
@@ -130,7 +132,7 @@ pub mod tests {
             threads.push(std::thread::spawn(move || {
                 let (mut lat, cpu0) = (Vec::new(), thread_cpu());
                 for (f, sent) in rx.iter() {
-                    enc.encode_frame(&mut |planes| bgrx_to_nv12(&f, canvas.width * 4, d * 1920, 0, 540, planes)).unwrap();
+                    enc.encode_frame(&mut |planes| bgrx_to_nv12(&f, canvas.width * 4, d * 1920, 0, 540, planes), false).unwrap();
                     lat.push(sent.elapsed().as_secs_f64() * 1000.0);
                 }
                 (lat, thread_cpu() - cpu0)
@@ -214,7 +216,7 @@ pub mod tests {
                     let cpu0 = thread_cpu();
                     for i in 0..FRAMES {
                         let f = &pool[i % pool.len()];
-                        enc.encode_frame(&mut |planes| bgrx_to_nv12(f, canvas.width * 4, d * 1920, 0, 540, planes))
+                        enc.encode_frame(&mut |planes| bgrx_to_nv12(f, canvas.width * 4, d * 1920, 0, 540, planes), false)
                             .unwrap();
                     }
                     thread_cpu() - cpu0

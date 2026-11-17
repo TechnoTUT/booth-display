@@ -104,7 +104,9 @@ flowchart TB
   - One ffmpeg process receives the whole canvas (5760x540 BGRX) once, converts it to `nv12`, and `split` and `crop` filters cut it into one region per display; each crop goes through `hwupload` to `h264_vaapi` (Constrained Baseline, AUD, no B-frames, every GOP starts with an IDR). If ffmpeg exits within the 2 s startup probe, the in-process libx264 encoder takes over.
   - Each display's output is muxed as FLV and passed through an extra pipe (`pipe:3`, `pipe:4`, ...). FLV carries the size of every frame, so an access unit is forwarded as soon as it is complete (`flv.rs`).
   - On the Sandy Bridge machine (i965) its output does not decode cleanly.
-- Packetization and UDP output (`sender.rs`, `protocol.rs`): each access unit is converted to Annex-B, split into packets with the 16-byte header, and queued for a send thread. A frame is queued whole or dropped whole, and after a drop P-frames are skipped until the next keyframe.
+- Packetization and UDP output (`sender.rs`, `protocol.rs`, protocol version 2, see [streaming-protocol.md](streaming-protocol.md)): each access unit is split into packets with the 16-byte header and queued for a send thread, which paces them at `pipeline.send_rate_mbps` (default 80 Mbps per display). A frame is queued whole or dropped whole, and after a drop P-frames are skipped until the next keyframe.
+  - Keyframe requests: a control thread per display reads the display's messages on the same socket. A KEYFRAME_REQUEST (or a frame dropped by the queue) makes the encode thread encode its next frame as an IDR, at most once per 250 ms. The in-process encoders restart their GOP there; the `vaapi-ffmpeg` encoder cannot be asked and waits for its next GOP.
+  - PING is answered with a PONG on the controller clock (microseconds, shared by all displays), the clock frame timestamps use, so a display can measure latency.
 - Preview (`preview.rs`): every canvas frame is thinned to 15 fps, downscaled to 1280 px wide and JPEG-encoded in-process.
 
 ### (3) NDI input (`core/src/ndi_input.rs`)

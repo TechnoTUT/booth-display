@@ -40,3 +40,4 @@ media:
 pipeline:
     encoder: auto # "auto" (VA-API if the render node exists, else libx264), "vaapi", "vaapi-ffmpeg" or "software"
     vaapi_device: /dev/dri/renderD128
+    send_rate_mbps: 0 # pacing of each display's packets in Mbps; 0 = default (80), -1 = off

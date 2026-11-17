@@ -181,16 +181,16 @@ impl Encoder {
         format!("libx264 build {} (in-process, ultrafast, {} kbit/s)", self.api.build, self.p.bitrate_kbps)
     }
 
-    /// Fills the input picture through `fill` and encodes it. Returns the
-    /// Annex-B access unit and whether it is an IDR. The access unit may be
-    /// empty if x264 produced nothing for this frame.
-    pub fn encode(&mut self, mut fill: impl FnMut(&mut Nv12Planes)) -> Result<(&[u8], bool)> {
+    /// Fills the input picture through `fill` and encodes it, as an IDR when
+    /// `force_idr`. Returns the Annex-B access unit and whether it is an IDR.
+    /// The access unit may be empty if x264 produced nothing for this frame.
+    pub fn encode(&mut self, mut fill: impl FnMut(&mut Nv12Planes), force_idr: bool) -> Result<(&[u8], bool)> {
         let w = self.p.width;
         let mut planes =
             Nv12Planes { width: w, height: self.p.height, y: &mut self.y, y_pitch: w, uv: &mut self.uv, uv_pitch: w };
         fill(&mut planes);
 
-        self.pic_in.i_type = X264_TYPE_AUTO;
+        self.pic_in.i_type = if force_idr { X264_TYPE_IDR } else { X264_TYPE_AUTO };
         self.pic_in.i_pts = self.pts;
         self.pts += 1;
         let mut nals: *mut x264_nal_t = std::ptr::null_mut();
@@ -252,6 +252,8 @@ mod tests {
         const AUD: [u8; 5] = [0, 0, 0, 1, 0x09];
         let (w, h) = (p.width, p.height);
         let mut inputs = Vec::new();
+        // A keyframe request in the middle of a GOP.
+        const FORCED_IDR: usize = 20;
         let mut stream = Vec::new();
         let mut keys = 0;
         for i in 0..FRAMES {
@@ -268,10 +270,11 @@ mod tests {
             bgrx_to_nv12(&frame, w * 4, 0, 0, h, &mut ref_planes);
             inputs.push(y_plane);
 
-            let (au, idr) = enc.encode(|planes| bgrx_to_nv12(&frame, w * 4, 0, 0, h, planes)).unwrap();
+            let (au, idr) = enc.encode(|planes| bgrx_to_nv12(&frame, w * 4, 0, 0, h, planes), i == FORCED_IDR).unwrap();
             assert!(!au.is_empty(), "frame {i}: no output (zero latency expected)");
             assert_eq!(&au[..5], &AUD, "frame {i} must start with an AUD");
-            assert_eq!(idr, i % 15 == 0, "frame {i}");
+            // GOP 15, restarted by the IDR forced at frame 20.
+            assert_eq!(idr, [0, 15, 20, 35].contains(&i), "frame {i}");
             if idr {
                 keys += 1;
                 assert!(au.windows(5).any(|w| w == [0, 0, 0, 1, 0x67]), "IDR {i}: no SPS");
@@ -279,7 +282,7 @@ mod tests {
             }
             stream.extend_from_slice(au);
         }
-        assert_eq!(keys, 3);
+        assert_eq!(keys, 4);
 
         if Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).status().is_err() {
             eprintln!("ffmpeg not installed; skipping the decode check");

@@ -252,12 +252,13 @@ impl Encoder {
             let (id, sender, stopping) = (d.id.clone(), sender.clone(), stopping.clone());
             threads.push(std::thread::Builder::new().name(format!("encoder-{id}")).spawn(move || {
                 let mut fr = FlvReader::new(std::io::BufReader::with_capacity(256 * 1024, reader));
-                let start = Instant::now();
                 loop {
                     match fr.next_au() {
+                        // ffmpeg cannot be asked for an IDR, so keyframe requests
+                        // wait for its next GOP; the timestamp is when the access
+                        // unit arrived, not when the canvas frame went in.
                         Ok(Some((au, key))) => {
-                            let ts = start.elapsed().as_millis() as u32;
-                            sender.send_frame(au, PAYLOAD_H264, key, ts);
+                            sender.send_frame(au, PAYLOAD_H264, key, crate::protocol::now_us());
                         }
                         Ok(None) => return,
                         Err(e) => {

@@ -16,6 +16,8 @@ use std::os::raw::{c_char, c_int, c_void};
 pub const X264_CSP_NV12: c_int = 0x0004;
 /// `X264_TYPE_AUTO`: let x264 choose the frame type.
 pub const X264_TYPE_AUTO: c_int = 0;
+/// `X264_TYPE_IDR`: force an IDR.
+pub const X264_TYPE_IDR: c_int = 0x0001;
 /// `X264_LOG_ERROR`.
 pub const X264_LOG_ERROR: c_int = 0;
 
@@ -184,6 +186,7 @@ mod tests {
             ("offsetof(x264_nal_t, p_payload)", offset_of!(x264_nal_t, p_payload), false),
             ("X264_CSP_NV12", X264_CSP_NV12 as usize, false),
             ("X264_TYPE_AUTO", X264_TYPE_AUTO as usize, false),
+            ("X264_TYPE_IDR", X264_TYPE_IDR as usize, false),
             ("X264_LOG_ERROR", X264_LOG_ERROR as usize, false),
         ];
         let mut src = String::from("#include <stdio.h>\n#include <stddef.h>\n#include <stdint.h>\n#include <x264.h>\nint main(void){\n");

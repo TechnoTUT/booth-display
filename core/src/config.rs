@@ -61,7 +61,13 @@ pub struct PipelineConfig {
     /// "auto", "vaapi" (in-process), "vaapi-ffmpeg" or "software".
     pub encoder: String,
     pub vaapi_device: String,
+    /// Pacing of each display's packets in Mbps: 0 for the default, negative
+    /// for no pacing.
+    pub send_rate_mbps: i64,
 }
+
+/// Default pacing: a little under a 100BASE-TX display link.
+pub const DEFAULT_SEND_RATE_MBPS: i64 = 80;
 
 pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
 
@@ -77,6 +83,15 @@ pub enum EncoderMode {
 }
 
 impl PipelineConfig {
+    /// The pacing rate for each display, None when pacing is off.
+    pub fn send_rate(&self) -> Option<f64> {
+        match self.send_rate_mbps {
+            0 => Some(DEFAULT_SEND_RATE_MBPS as f64),
+            r if r < 0 => None,
+            r => Some(r as f64),
+        }
+    }
+
     /// The encoder to try first. "auto" uses VA-API when the render node exists.
     pub fn mode(&self) -> EncoderMode {
         let device = if self.vaapi_device.is_empty() {
@@ -100,12 +115,20 @@ mod tests {
 
     #[test]
     fn encoder_modes() {
-        let m = |e: &str| PipelineConfig { encoder: e.into(), vaapi_device: "/dev/null".into() }.mode();
+        let m = |e: &str| PipelineConfig { encoder: e.into(), vaapi_device: "/dev/null".into(), ..Default::default() }.mode();
         assert_eq!(m("software"), EncoderMode::Software);
         assert_eq!(m("vaapi"), EncoderMode::Vaapi("/dev/null".into()));
         assert_eq!(m("vaapi-ffmpeg"), EncoderMode::FfmpegVaapi("/dev/null".into()));
         assert_eq!(m("auto"), EncoderMode::Vaapi("/dev/null".into()));
-        let missing = PipelineConfig { encoder: "auto".into(), vaapi_device: "/nonexistent".into() };
+        let missing = PipelineConfig { encoder: "auto".into(), vaapi_device: "/nonexistent".into(), ..Default::default() };
         assert_eq!(missing.mode(), EncoderMode::Software);
+    }
+
+    #[test]
+    fn send_rate() {
+        let r = |send_rate_mbps| PipelineConfig { send_rate_mbps, ..Default::default() }.send_rate();
+        assert_eq!(r(0), Some(DEFAULT_SEND_RATE_MBPS as f64));
+        assert_eq!(r(50), Some(50.0));
+        assert_eq!(r(-1), None);
     }
 }

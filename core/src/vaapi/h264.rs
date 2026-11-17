@@ -355,11 +355,15 @@ impl Encoder {
         self.render(VA_ENC_MISC_PARAMETER_BUFFER_TYPE, &fr)
     }
 
-    /// Encodes one frame, filled into the NV12 input by `fill`. Returns the
-    /// access unit (Annex-B, AUD first) and whether it is an IDR. The data is
-    /// valid until the next call.
-    pub fn encode(&mut self, mut fill: impl FnMut(&mut Nv12Planes)) -> Result<(&[u8], bool)> {
+    /// Encodes one frame, filled into the NV12 input by `fill`, as an IDR
+    /// when `force_idr` (the GOP then restarts there). Returns the access unit
+    /// (Annex-B, AUD first) and whether it is an IDR. The data is valid until
+    /// the next call.
+    pub fn encode(&mut self, mut fill: impl FnMut(&mut Nv12Planes), force_idr: bool) -> Result<(&[u8], bool)> {
         self.upload(&mut fill)?;
+        if force_idr {
+            self.frame_in_gop = 0;
+        }
         let idr = self.frame_in_gop == 0;
         if idr {
             self.frame_num = 0;
@@ -519,6 +523,8 @@ mod tests {
         const FRAMES: usize = 45;
         const W: usize = 640;
         const H: usize = 360;
+        // A keyframe request in the middle of a GOP.
+        const FORCED_IDR: usize = 20;
         let mut stream = Vec::new();
         let mut keys = 0;
         let mut bgrx = vec![0u8; W * H * 4];
@@ -535,20 +541,21 @@ mod tests {
             bgrx_to_nv12(&bgrx, W * 4, 0, 0, H, &mut Nv12Planes { width: W, height: 368, y: &mut yp, y_pitch: W, uv: &mut uvp, uv_pitch: W });
             want_luma.extend_from_slice(&yp[..W * H]);
 
-            let (au, idr) = enc.encode(|planes| bgrx_to_nv12(&bgrx, W * 4, 0, 0, H, planes)).unwrap();
+            let (au, idr) = enc.encode(|planes| bgrx_to_nv12(&bgrx, W * 4, 0, 0, H, planes), i == FORCED_IDR).unwrap();
             if std::env::var_os("DUMP_NALS").is_some() && i < 3 {
                 let types: Vec<u8> = au.windows(4).enumerate().filter(|(_, w)| w[..3] == [0, 0, 1]).map(|(k, _)| au[k + 3] & 0x1f).collect();
                 eprintln!("frame {i}: {} bytes, NAL types {types:?}", au.len());
             }
             assert_eq!(&au[..6], &AUD, "frame {i} must start with an AUD");
-            assert_eq!(idr, i % 15 == 0, "frame {i}");
+            // GOP 15, restarted by the IDR forced at frame 20.
+            assert_eq!(idr, [0, 15, 20, 35].contains(&i), "frame {i}");
             if idr {
                 keys += 1;
                 assert_eq!(&au[6..11], &[0, 0, 0, 1, 0x67], "IDR {i}: SPS right after the AUD");
             }
             stream.extend_from_slice(au);
         }
-        assert_eq!(keys, 3);
+        assert_eq!(keys, 4);
 
         // Decode and compare the luma with what went in.
         let mut dec = Command::new("ffmpeg")
