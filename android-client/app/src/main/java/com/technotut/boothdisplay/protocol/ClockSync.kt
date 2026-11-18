@@ -42,6 +42,15 @@ class ClockSync(private val window: Int = 8) {
         rttUs = rtts[best]
     }
 
+    /** Forgets every PONG (the controller restarted, so its clock has a new origin). */
+    @Synchronized
+    fun reset() {
+        count = 0
+        next = 0
+        rttUs = -1L
+        offsetUs = 0L
+    }
+
     /**
      * Microseconds from controller time [senderTimestamp] to display time
      * [displayUs], or null before the first PONG.
