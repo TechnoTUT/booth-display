@@ -21,8 +21,22 @@ This document covers notes, dependencies and testing for developing and maintain
 - Requires JDK 17 or later and the Android SDK (`platforms;android-34`, `build-tools;34.0.0`).
 - Point to the SDK with `sdk.dir=...` in `android-client/local.properties` (not tracked by git) or with the `ANDROID_HOME` environment variable.
 - Build: `cd android-client && ./gradlew assembleDebug` (output: `app/build/outputs/apk/debug/app-debug.apk`)
-- Unit tests (JVM, no device): `cd android-client && ./gradlew testDebugUnitTest`. They cover the packet header, reassembly and loss detection, the clock offset, the statistics, and the receive thread against a fake controller socket (keyframe requests, PING/PONG).
+- Unit tests (JVM, no device): `cd android-client && ./gradlew testDebugUnitTest`. They cover the packet header, reassembly, loss detection and controller restarts, the clock offset, the statistics, the vsync pacer, and the receive thread against a fake controller socket (keyframe requests, PING/PONG, restarts).
 - Measuring on a display: `adb logcat -s BoothStats` prints one line per second (fields in [architecture.md](architecture.md#3-android-client-internals-android-client)), e.g. `fps=30.0 e2e=38.2/41.0/45.5 net=2.1/3.0/4.2 wait=0.1/0.1/0.3 dec=14.0/15.2/16.1 stalls=0 lost=0 skipped=0 kfreq=1 backlog=0 rtt=0.80ms paced=12/0`. The controller and the app must speak the same protocol version; on a mismatch the OSD says so.
+- Frames actually shown: BoothStats counts decoded pictures, not the ones SurfaceFlinger presents. `adb shell dumpsys SurfaceFlinger --latency "SurfaceView - com.technotut.boothdisplay/com.technotut.boothdisplay.MainActivity"` prints the refresh period and the present times of the last 127 frames; their spacing in refreshes shows dropped or repeated frames.
+- Packet loss on purpose: drop a share of the video packets to one display on the controller host with nftables (other traffic, adb included, is untouched), and remove the table afterwards:
+  ```sh
+  sudo nft -f - <<'EOF'
+  table inet boothloss {
+    chain out {
+      type filter hook output priority 0; policy accept;
+      ip daddr <display-ip> udp dport 8554 numgen random mod 1000 < 1 counter drop
+    }
+  }
+  EOF
+  sudo nft delete table inet boothloss   # when done
+  ```
+  `mod 1000 < 1` drops 0.1%. `lost`, `skipped` and `kfreq` in BoothStats show the recovery.
 
 ### Client simulator
 - A tool that receives and decodes the UDP stream without real hardware and shows it in a web browser (`tools/simulator/client_simulator.py`).
