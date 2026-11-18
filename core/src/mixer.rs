@@ -391,6 +391,48 @@ mod tests {
         assert!((12..=18).contains(&n), "got {n} frames in 0.5 s at 30 fps");
     }
 
+    /// The mixer wakes on the frames of the external source on screen, also
+    /// while a transition brings it in, and on its ticker otherwise. Needs ffmpeg.
+    #[test]
+    fn renders_on_ffmpeg_frame_arrival() {
+        let m = Mixer::start(canvas(), &[]).unwrap();
+        let notifier = || m.inner.state.lock().unwrap().source_notifier().is_some();
+        assert!(!notifier(), "the test pattern is drawn on the ticker");
+        m.switch_source("rainbow", "", Transition::Fade, 10_000).unwrap();
+        assert!(notifier(), "a transition to rainbow follows its frames");
+        m.switch_source("rainbow", "", Transition::Cut, 0).unwrap();
+        assert!(notifier());
+        m.switch_source("logo", "", Transition::Cut, 0).unwrap();
+        assert!(!notifier());
+    }
+
+    /// Every frame ffmpeg delivers goes out exactly once. testsrc changes
+    /// every frame, so an output equal to the previous one is a repeat. The
+    /// old ticker-driven rendering repeated frames only while its clock and
+    /// ffmpeg's were in phase, so this catches that only in some runs;
+    /// renders_on_ffmpeg_frame_arrival checks the wiring. Needs ffmpeg.
+    #[test]
+    fn ffmpeg_source_frames_are_not_repeated() {
+        let c = Canvas { width: 320, height: 180, fps: 30 };
+        let m = Mixer::start(c, &[]).unwrap();
+        m.switch_source("rainbow", "", Transition::Cut, 0).unwrap();
+        let rx = m.subscribe();
+        // Skip startup, until ffmpeg delivers frames.
+        let first = rx.iter().find(|f| f.iter().any(|&b| b != 0)).unwrap();
+        let (mut prev, mut frames, mut repeats) = (first, 0, 0);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            let f = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            if f[..] == prev[..] {
+                repeats += 1;
+            }
+            prev = f;
+            frames += 1;
+        }
+        assert!(frames >= 140, "only {frames} frames in 5 s at 30 fps");
+        assert_eq!(repeats, 0, "{repeats} of {frames} frames repeated the previous one");
+    }
+
     #[test]
     fn crossfade_is_between_frames() {
         let mut prev = vec![200u8; 8];
