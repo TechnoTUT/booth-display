@@ -118,4 +118,27 @@ class UdpStreamReceiverTest {
         assertTrue(snap.keyframeRequestsTotal >= 2)
         waitFor("pool refilled") { pool.available == 8 }
     }
+
+    @Test
+    fun startsOverWhenTheControllerRestarts() {
+        sendFrame(1, keyframe = true)
+        sendFrame(2, keyframe = false)
+        awaitControl(PacketHeader.PAYLOAD_TYPE_PING)
+        waitFor("clock sync") { clock.rttUs >= 0 }
+        waitFor("first run") { submitted.size == 2 }
+
+        // The restarted controller sends from a new port, numbering from 0
+        // again, and a P-frame comes first.
+        controller.close()
+        controller = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
+        controller.soTimeout = 2000
+        seq = 0
+        sendFrame(3, keyframe = false)
+        awaitControl(PacketHeader.PAYLOAD_TYPE_KEYFRAME_REQUEST)
+        sendFrame(4, keyframe = true)
+        sendFrame(5, keyframe = false)
+        waitFor("second run") { submitted.size == 4 }
+        assertEquals(listOf<Byte>(1, 2, 4, 5), submitted.toList())
+        assertEquals(1L, receiver.streamRestarts)
+    }
 }

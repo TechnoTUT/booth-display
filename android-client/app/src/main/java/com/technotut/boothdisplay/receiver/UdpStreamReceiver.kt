@@ -29,6 +29,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Control messages go from the receive socket to the address the video comes
  * from, the only address the controller accepts them from.
+ *
+ * A restarted controller sends from a new port, numbers its packets from 0
+ * again and has a new clock origin. Either sign (a new source, or numbers far
+ * behind the old ones) starts the stream over: reassembly, clock sync and the
+ * wait for a keyframe.
  */
 class UdpStreamReceiver(
     private val port: Int,
@@ -68,6 +73,11 @@ class UdpStreamReceiver(
     var wrongVersionPackets: Long = 0L
         private set
 
+    /** Times the stream started over because the controller restarted. */
+    @Volatile
+    var streamRestarts: Long = 0L
+        private set
+
     /** System.nanoTime() of the last complete frame, 0 before the first. */
     @Volatile
     var lastFrameNs: Long = 0L
@@ -85,7 +95,9 @@ class UdpStreamReceiver(
     private val controlBuf = ByteArray(PacketHeader.HEADER_SIZE)
     private val controlPacket = DatagramPacket(controlBuf, controlBuf.size)
 
-    private val assembler = FrameAssembler(pool, ::onFrame, ::onLoss)
+    private val assembler = FrameAssembler(pool, ::onFrame, ::onLoss) {
+        onStreamRestart("sequence numbers started over")
+    }
 
     fun start() {
         if (isRunning.getAndSet(true)) return
@@ -175,8 +187,8 @@ class UdpStreamReceiver(
         val now = System.nanoTime()
         when (header.payloadType) {
             PacketHeader.PAYLOAD_TYPE_H264 -> {
-                rememberController(packet)
                 lastVideoSeq = header.sequenceNumber
+                rememberController(packet)
                 assembler.onPacket(header, buf, PacketHeader.HEADER_SIZE, length - PacketHeader.HEADER_SIZE, now)
             }
             PacketHeader.PAYLOAD_TYPE_PONG -> if (length >= PacketHeader.PONG_SIZE) {
@@ -189,12 +201,26 @@ class UdpStreamReceiver(
     private fun rememberController(packet: DatagramPacket) {
         val addr = packet.address
         if (addr != controllerAddr || packet.port != controllerPort) {
+            val known = controllerAddr != null
             controllerAddr = addr
             controllerPort = packet.port
             controlPacket.address = addr
             controlPacket.port = packet.port
             Log.i(TAG, "Controller at ${addr.hostAddress}:${packet.port}")
+            if (known) onStreamRestart("new controller address")
         }
+    }
+
+    /** Drops everything tied to the previous controller run and waits for a keyframe. */
+    private fun onStreamRestart(reason: String) {
+        Log.i(TAG, "Stream restarted ($reason)")
+        streamRestarts++
+        assembler.reset()
+        clock.reset()
+        waitingForKeyframe = true
+        lastKeyframeRequestNs = 0L // ask right away
+        lastPingNs = 0L // and resync the clock right away
+        socket?.let { periodic(it, System.nanoTime()) }
     }
 
     private fun onFrame(frame: Frame) {
