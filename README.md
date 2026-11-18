@@ -171,6 +171,30 @@ Then open the dashboard in a browser:
 
 ---
 
+## Container image and Kubernetes
+
+[Containerfile](Containerfile) builds one image with `display-controller` and `booth-core`, the VA-API drivers (iHD and i965), libx264 and FFmpeg. It runs as UID 10001 and keeps `config.yaml` on the `/data` volume: on the first start the entrypoint copies it from `/etc/booth-display/config.yaml` (the image's default, or a ConfigMap mounted there), and from then on the Web GUI saves its changes to `/data/config.yaml`. Video files go in `/data/assets/`. Arguments are passed on to `display-controller` (e.g. `-auto-start`).
+
+```bash
+git submodule update --init
+podman build -t booth-display -f Containerfile .
+```
+
+The NDI runtime is **not** in the image, because of the NDI SDK license. `install-ndi-sdk.sh` is: with `NDI_LIB_DIR=/ndi` it only copies `libndi.so*` there (no sudo, no ldconfig), and the image already sets `NDI_RUNTIME_DIR_V6=/ndi`.
+
+Pushing a controller release tag `controller-vX.Y.Z` makes GitHub Actions ([image.yml](.github/workflows/image.yml)) push `ghcr.io/technotut/booth-display:X.Y.Z`, and `:latest` unless the version has a pre-release suffix. Pull requests that touch the image only build it.
+
+[deploy/k8s/](deploy/k8s/) is a sample for the TechnoTUT cluster (kustomize, in the style of [TechnoTUT/Infra](https://github.com/TechnoTUT/Infra)'s `k8s/manifest`):
+
+- An init container fetches the NDI runtime from the official SDK on every start (`NDI_ACCEPT_LICENSE=yes`: whoever deploys it accepts the NDI SDK license). Without WAN access the pod still starts, without NDI input.
+- Multus attaches the pod to the AV VLAN (`kube-public/vlan20-bridge`) for NDI, and `ndi-config.v1.json` points NDI at the Discovery Server. Video to the displays leaves through the pod network and is routed; the displays answer to the source address and port, so their control messages come back through conntrack.
+- `config.yaml` (the seed; set the displays' IPs) and the data volume (NFS PVC). Replace `/data/config.yaml` on the PVC, or delete it, to apply a changed seed.
+- `vaapi-patch.yaml` hands the node's Intel GPU to the pod (hostPath `/dev/dri`, privileged, the node's `render` group ID, a node label). Remove it from `kustomization.yaml` to encode with libx264 only.
+
+`kubectl kustomize deploy/k8s` shows the result.
+
+---
+
 ## Android client app (android-client/)
 
 The app that receives and displays the video on the LG Display LD290EJS-FPN1 (Android 7.1 / 1920x540).
