@@ -286,6 +286,7 @@ media:
 pipeline:
   encoder: "auto" # "auto" (prefer VA-API, fall back automatically), "vaapi", "vaapi-ffmpeg" (VA-API through ffmpeg, for comparison) or "software"
   vaapi_device: "/dev/dri/renderD128" # VA-API device node
+  send_rate_mbps: 0 # pacing of each display's packets in Mbps; 0 = default (80), -1 = off
 ```
 
 ---

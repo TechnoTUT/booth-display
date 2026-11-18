@@ -66,7 +66,7 @@ impl Engine {
     ) -> anyhow::Result<()> {
         let mut senders = Vec::with_capacity(displays.len());
         for d in &displays {
-            let s = DisplaySender::new(d).map_err(|e| anyhow::anyhow!("display {}: {e}", d.id))?;
+            let s = DisplaySender::new(d, pipeline.send_rate()).map_err(|e| anyhow::anyhow!("display {}: {e}", d.id))?;
             senders.push(s);
         }
         let canvas_changed = canvas.resolve() != self.canvas.resolve();

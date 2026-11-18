@@ -4,15 +4,29 @@ import android.app.Activity
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import com.technotut.boothdisplay.decoder.HardwareH264Decoder
+import com.technotut.boothdisplay.protocol.ClockSync
+import com.technotut.boothdisplay.protocol.FramePool
+import com.technotut.boothdisplay.protocol.StreamStats
 import com.technotut.boothdisplay.receiver.UdpStreamReceiver
 
 class MainActivity : Activity(), SurfaceHolder.Callback {
+
+    companion object {
+        /** logcat tag of the per-second figures: adb logcat -s BoothStats */
+        private const val STATS_TAG = "BoothStats"
+        private const val STREAM_TIMEOUT_NS = 5_000_000_000L
+
+        /** Frames being assembled, waiting for the decoder and being copied in. */
+        private const val FRAME_POOL_SIZE = 8
+        private const val FRAME_CAPACITY = 1024 * 1024
+    }
 
     private lateinit var surfaceView: SurfaceView
     private lateinit var osdOverlay: View
@@ -23,30 +37,20 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var dotStatus: View
     private lateinit var textConnectionStatus: TextView
 
-    private val decoder = HardwareH264Decoder(width = 1920, height = 540)
+    private val pool = FramePool(FRAME_POOL_SIZE, FRAME_CAPACITY)
+    private val stats = StreamStats()
+    private val clock = ClockSync()
+    private val decoder = HardwareH264Decoder(width = 1920, height = 540, pool = pool, stats = stats, clock = clock)
     private var receiver: UdpStreamReceiver? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var frameCount = 0
-    private var totalFrames = 0L
-    private var lastFpsCalculationTime = System.currentTimeMillis()
     private var isStreamingActive = false
 
-    // 5-second stream timeout runnable to restore OSD standby view
-    private val streamTimeoutRunnable = Runnable {
-        isStreamingActive = false
-        updateConnectionStatus(false)
-        textStatus.text = "UDP :$listenPort"
-        textMetrics.text = "Waiting for stream..."
-        textMetrics.setTextColor(android.graphics.Color.parseColor("#64748B"))
-        val err = receiver?.lastError
-        if (err != null) {
-            textDiagnostics.text = err
-            textDiagnostics.setTextColor(android.graphics.Color.parseColor("#EF4444"))
-        } else {
-            val rcvBufKb = (receiver?.receiveBufferBytes ?: 0) / 1024
-            textDiagnostics.text = "Rx: ${receiver?.packetCount ?: 0} pkts | RcvBuf: ${rcvBufKb} KB | Ready"
-            textDiagnostics.setTextColor(android.graphics.Color.parseColor("#64748B"))
+    /** Once a second: logs the figures and refreshes the OSD. */
+    private val statsTicker = object : Runnable {
+        override fun run() {
+            updateStats()
+            mainHandler.postDelayed(this, 1000)
         }
     }
 
@@ -176,61 +180,65 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private fun startReceiver() {
         stopReceiver()
+        receiver = UdpStreamReceiver(listenPort, pool, stats, clock, decoder::submit).apply { start() }
+        stats.snapshot(System.nanoTime(), clock.rttUs) // start a fresh window
+        mainHandler.postDelayed(statsTicker, 1000)
+    }
 
-        receiver = UdpStreamReceiver(port = listenPort) { frame, isKeyframe, timestamp ->
-            decoder.decodeFrame(frame, isKeyframe, timestamp * 1000L)
+    private fun updateStats() {
+        val r = receiver ?: return
+        val now = System.nanoTime()
+        val snap = stats.snapshot(now, clock.rttUs)
+        val streaming = r.lastFrameNs != 0L && now - r.lastFrameNs < STREAM_TIMEOUT_NS
+        if (streaming) Log.i(STATS_TAG, snap.logLine())
 
-            frameCount++
-            val now = System.currentTimeMillis()
-
-            mainHandler.post {
-                // Cancel existing timeout timer & reschedule for 5.0 seconds
-                mainHandler.removeCallbacks(streamTimeoutRunnable)
-                mainHandler.postDelayed(streamTimeoutRunnable, 5000)
-
-                totalFrames++
-                val rxPkts = receiver?.packetCount ?: 0L
-                val rendered = decoder.renderedFrameCount
-                val err = decoder.lastError ?: receiver?.lastError
-                val dropped = receiver?.droppedFrames ?: 0L
-                val dropText = if (dropped > 0) " | Drop: $dropped" else ""
-
-                if (!isStreamingActive) {
-                    isStreamingActive = true
-                    updateConnectionStatus(true)
-                }
-
-                if (now - lastFpsCalculationTime >= 1000) {
-                    val fps = frameCount.toDouble() * 1000.0 / (now - lastFpsCalculationTime)
-                    frameCount = 0
-                    lastFpsCalculationTime = now
-
-                    textStatus.text = "UDP :$listenPort"
-                    if (err != null) {
-                        textMetrics.text = "Decoder Error"
-                        textMetrics.setTextColor(android.graphics.Color.parseColor("#EF4444"))
-                        textDiagnostics.text = "$err | NAL: ${decoder.lastNalType} | Rx: $rxPkts"
-                        textDiagnostics.setTextColor(android.graphics.Color.parseColor("#EF4444"))
-                    } else if (rendered > 0) {
-                        textMetrics.text = String.format("%.1f FPS (Rend: %d)", fps, rendered)
-                        textMetrics.setTextColor(android.graphics.Color.parseColor("#10B981"))
-                        textDiagnostics.text = "Rx: $rxPkts pkts | NAL: ${decoder.lastNalType} | Rend: $rendered$dropText"
-                        textDiagnostics.setTextColor(android.graphics.Color.parseColor("#10B981"))
-                    } else {
-                        textMetrics.text = String.format("%.1f FPS (Waiting IDR)", fps)
-                        textMetrics.setTextColor(android.graphics.Color.parseColor("#F59E0B"))
-                        textDiagnostics.text = "Rx: $rxPkts pkts | NAL: ${decoder.lastNalType} | Rend: 0"
-                        textDiagnostics.setTextColor(android.graphics.Color.parseColor("#F59E0B"))
-                    }
-                }
+        textStatus.text = "UDP :$listenPort"
+        if (streaming != isStreamingActive) {
+            isStreamingActive = streaming
+            updateConnectionStatus(streaming)
+        }
+        val err = decoder.lastError ?: r.lastError
+        val red = android.graphics.Color.parseColor("#EF4444")
+        val green = android.graphics.Color.parseColor("#10B981")
+        val amber = android.graphics.Color.parseColor("#F59E0B")
+        val grey = android.graphics.Color.parseColor("#64748B")
+        when {
+            r.wrongVersionPackets > 0 && !streaming -> {
+                textMetrics.text = "Protocol mismatch"
+                textMetrics.setTextColor(red)
+                textDiagnostics.text = "Packets of another protocol version: ${r.wrongVersionPackets} (update the controller or this app)"
+                textDiagnostics.setTextColor(red)
             }
-        }.apply {
-            start()
+            err != null -> {
+                textMetrics.text = "Decoder Error"
+                textMetrics.setTextColor(red)
+                textDiagnostics.text = "$err | Rx: ${r.packetCount}"
+                textDiagnostics.setTextColor(red)
+            }
+            !streaming -> {
+                textMetrics.text = "Waiting for stream..."
+                textMetrics.setTextColor(grey)
+                textDiagnostics.text = "Rx: ${r.packetCount} pkts | RcvBuf: ${r.receiveBufferBytes / 1024} KB | Ready"
+                textDiagnostics.setTextColor(grey)
+            }
+            decoder.renderedFrameCount == 0L -> {
+                textMetrics.text = String.format("%.1f FPS (Waiting IDR)", snap.fps)
+                textMetrics.setTextColor(amber)
+                textDiagnostics.text = snap.logLine()
+                textDiagnostics.setTextColor(amber)
+            }
+            else -> {
+                val e2e = snap.e2e?.let { String.format(" | %.0f ms", it[0]) } ?: ""
+                textMetrics.text = String.format("%.1f FPS%s", snap.fps, e2e)
+                textMetrics.setTextColor(green)
+                textDiagnostics.text = "${snap.logLine()} | ${decoder.description}"
+                textDiagnostics.setTextColor(green)
+            }
         }
     }
 
     private fun stopReceiver() {
-        mainHandler.removeCallbacks(streamTimeoutRunnable)
+        mainHandler.removeCallbacks(statsTicker)
         receiver?.stop()
         receiver = null
     }

@@ -43,7 +43,7 @@ except ImportError as e:
     sys.exit(1)
 
 MAGIC_BYTE = 0xBD
-VERSION_BYTE = 0x01
+VERSION_BYTE = 0x02
 HEADER_SIZE = 16
 
 

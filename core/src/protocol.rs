@@ -1,9 +1,12 @@
-//! Video packet format sent to the displays over UDP (see
-//! docs/streaming-protocol.md): a 16-byte big-endian header followed by a
-//! fragment of one H.264 Access Unit.
+//! Packet format between the controller and the displays over UDP, version 2
+//! (see docs/streaming-protocol.md): a 16-byte big-endian header followed by
+//! a fragment of one H.264 Access Unit, or a control message.
+
+use std::sync::OnceLock;
+use std::time::Instant;
 
 pub const MAGIC: u8 = 0xBD;
-pub const VERSION: u8 = 0x01;
+pub const VERSION: u8 = 0x02;
 pub const HEADER_SIZE: usize = 16;
 
 pub const PAYLOAD_H264: u8 = 0x01;
@@ -11,11 +14,25 @@ pub const PAYLOAD_H264: u8 = 0x01;
 pub const PAYLOAD_JPEG: u8 = 0x02;
 #[allow(dead_code)]
 pub const PAYLOAD_RAW: u8 = 0x03;
+/// Display asks for an IDR after a loss.
+pub const PAYLOAD_KEYFRAME_REQUEST: u8 = 0x10;
+/// Display measures round-trip time and clock offset.
+pub const PAYLOAD_PING: u8 = 0x11;
+/// Controller's answer to a PING; the payload is the PING's timestamp.
+pub const PAYLOAD_PONG: u8 = 0x12;
 
 /// Last packet of the frame.
 pub const FLAG_MARKER: u8 = 0x01;
-/// The frame contains SPS/PPS or an IDR slice.
+/// The frame is an IDR (and carries SPS/PPS).
 pub const FLAG_KEYFRAME: u8 = 0x02;
+
+/// The controller's clock for packet timestamps: microseconds since the
+/// first call, truncated to 32 bits (wraps every 71.6 minutes). One clock for
+/// all displays, so PONGs from any display's socket agree with its frames.
+pub fn now_us() -> u32 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u32
+}
 
 /// Keeps a packet under the 1500-byte Ethernet MTU (1400 + 16 header + 28 UDP/IP).
 pub const MAX_PAYLOAD: usize = 1400;
@@ -42,7 +59,6 @@ impl PacketHeader {
         out[14..16].copy_from_slice(&self.fragment_total.to_be_bytes());
     }
 
-    #[cfg(test)]
     pub fn parse(data: &[u8]) -> Option<(PacketHeader, &[u8])> {
         if data.len() < HEADER_SIZE || data[0] != MAGIC || data[1] != VERSION {
             return None;
@@ -61,6 +77,22 @@ impl PacketHeader {
             &data[HEADER_SIZE..],
         ))
     }
+}
+
+/// The PONG answering `ping`, stamped with the controller clock `now`.
+pub fn pong(ping: &PacketHeader, now: u32) -> [u8; HEADER_SIZE + 4] {
+    let mut out = [0u8; HEADER_SIZE + 4];
+    PacketHeader {
+        payload_type: PAYLOAD_PONG,
+        flags: 0,
+        sequence: ping.sequence,
+        timestamp: now,
+        fragment_index: 0,
+        fragment_total: 1,
+    }
+    .write(&mut out);
+    out[HEADER_SIZE..].copy_from_slice(&ping.timestamp.to_be_bytes());
+    out
 }
 
 /// Number of packets `len` bytes are split into.
@@ -114,7 +146,7 @@ mod tests {
         };
         let mut buf = [0u8; HEADER_SIZE];
         h.write(&mut buf);
-        assert_eq!(buf[0], MAGIC);
+        assert_eq!(buf[..2], [0xBD, 0x02]);
         let (got, payload) = PacketHeader::parse(&buf).unwrap();
         assert_eq!(got, h);
         assert!(payload.is_empty());
@@ -136,10 +168,27 @@ mod tests {
             assert_eq!(h.timestamp, 42);
             assert_ne!(h.flags & FLAG_KEYFRAME, 0);
             assert_eq!(h.flags & FLAG_MARKER != 0, i == 2);
-            assert!(payload.len() <= MAX_PAYLOAD);
+            // Receivers place fragment i at i * MAX_PAYLOAD.
+            assert_eq!(payload.len(), if i < 2 { MAX_PAYLOAD } else { 100 });
             joined.extend_from_slice(payload);
         }
         assert_eq!(joined, data);
+    }
+
+    #[test]
+    fn pong_echoes_ping() {
+        let ping = PacketHeader {
+            payload_type: PAYLOAD_PING,
+            flags: 0,
+            sequence: 7,
+            timestamp: 0x0102_0304,
+            fragment_index: 0,
+            fragment_total: 1,
+        };
+        let out = pong(&ping, 99);
+        let (h, payload) = PacketHeader::parse(&out).unwrap();
+        assert_eq!((h.payload_type, h.sequence, h.timestamp), (PAYLOAD_PONG, 7, 99));
+        assert_eq!(payload, [1, 2, 3, 4]);
     }
 
     #[test]

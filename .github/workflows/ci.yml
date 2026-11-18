@@ -66,3 +66,22 @@ jobs:
             grep -E 'unpaced|skipping' throughput.log >> "$GITHUB_STEP_SUMMARY"
           done
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  android:
+    # The runner image ships the Android SDK (ANDROID_HOME).
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: android-client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests and debug build
+        run: ./gradlew testDebugUnitTest assembleDebug

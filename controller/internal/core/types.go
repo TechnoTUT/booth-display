@@ -32,17 +32,19 @@ type SceneStatus struct {
 
 // DisplayMetrics are the per-display streaming statistics.
 type DisplayMetrics struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Target      string    `json:"target"`
-	IsConnected bool      `json:"is_connected"`
-	FPS         float64   `json:"fps"`
-	BitrateKbps float64   `json:"bitrate_kbps"`
-	PacketsSent uint64    `json:"packets_sent"`
-	BytesSent   uint64    `json:"bytes_sent"`
-	FramesSent  uint64    `json:"frames_sent"`
-	Drops       uint64    `json:"drops"`
-	LastSentAt  time.Time `json:"last_sent_at"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Target      string  `json:"target"`
+	IsConnected bool    `json:"is_connected"`
+	FPS         float64 `json:"fps"`
+	BitrateKbps float64 `json:"bitrate_kbps"`
+	PacketsSent uint64  `json:"packets_sent"`
+	BytesSent   uint64  `json:"bytes_sent"`
+	FramesSent  uint64  `json:"frames_sent"`
+	Drops       uint64  `json:"drops"`
+	// KeyframeRequests counts the display's requests for an IDR after a loss.
+	KeyframeRequests uint64    `json:"keyframe_requests"`
+	LastSentAt       time.Time `json:"last_sent_at"`
 }
 
 // UnmarshalJSON reads the core's last_sent_unix_ms into LastSentAt.

@@ -45,6 +45,8 @@ type MediaConfig struct {
 type PipelineConfig struct {
 	Encoder     string `yaml:"encoder" json:"encoder"`           // "auto", "vaapi", "vaapi-ffmpeg", "software"
 	VAAPIDevice string `yaml:"vaapi_device" json:"vaapi_device"` // default: "/dev/dri/renderD128"
+	// Pacing of each display's packets in Mbps: 0 for the default (80), -1 for none.
+	SendRateMbps int `yaml:"send_rate_mbps" json:"send_rate_mbps"`
 }
 
 type Config struct {

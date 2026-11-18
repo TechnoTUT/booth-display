@@ -21,6 +21,22 @@ This document covers notes, dependencies and testing for developing and maintain
 - Requires JDK 17 or later and the Android SDK (`platforms;android-34`, `build-tools;34.0.0`).
 - Point to the SDK with `sdk.dir=...` in `android-client/local.properties` (not tracked by git) or with the `ANDROID_HOME` environment variable.
 - Build: `cd android-client && ./gradlew assembleDebug` (output: `app/build/outputs/apk/debug/app-debug.apk`)
+- Unit tests (JVM, no device): `cd android-client && ./gradlew testDebugUnitTest`. They cover the packet header, reassembly, loss detection and controller restarts, the clock offset, the statistics, the vsync pacer, and the receive thread against a fake controller socket (keyframe requests, PING/PONG, restarts).
+- Measuring on a display: `adb logcat -s BoothStats` prints one line per second (fields in [architecture.md](architecture.md#3-android-client-internals-android-client)), e.g. `fps=30.0 e2e=38.2/41.0/45.5 net=2.1/3.0/4.2 wait=0.1/0.1/0.3 dec=14.0/15.2/16.1 stalls=0 lost=0 skipped=0 kfreq=1 backlog=0 rtt=0.80ms paced=12/0`. The controller and the app must speak the same protocol version; on a mismatch the OSD says so.
+- Frames actually shown: BoothStats counts decoded pictures, not the ones SurfaceFlinger presents. `adb shell dumpsys SurfaceFlinger --latency "SurfaceView - com.technotut.boothdisplay/com.technotut.boothdisplay.MainActivity"` prints the refresh period and the present times of the last 127 frames; their spacing in refreshes shows dropped or repeated frames.
+- Packet loss on purpose: drop a share of the video packets to one display on the controller host with nftables (other traffic, adb included, is untouched), and remove the table afterwards:
+  ```sh
+  sudo nft -f - <<'EOF'
+  table inet boothloss {
+    chain out {
+      type filter hook output priority 0; policy accept;
+      ip daddr <display-ip> udp dport 8554 numgen random mod 1000 < 1 counter drop
+    }
+  }
+  EOF
+  sudo nft delete table inet boothloss   # when done
+  ```
+  `mod 1000 < 1` drops 0.1%. `lost`, `skipped` and `kfreq` in BoothStats show the recovery.
 
 ### Client simulator
 - A tool that receives and decodes the UDP stream without real hardware and shows it in a web browser (`tools/simulator/client_simulator.py`).
@@ -93,5 +109,5 @@ This document covers notes, dependencies and testing for developing and maintain
   THROUGHPUT_TEST=1 cargo test --release --manifest-path core/Cargo.toml vaenc::tests::throughput -- --nocapture
   THROUGHPUT_TEST=1 cargo test --release --manifest-path core/Cargo.toml x264enc::tests::throughput -- --nocapture
   ```
-- CI (`.github/workflows/ci.yml`, GitHub-hosted `ubuntu-24.04`) runs `make build-frontend test` on every pull request and push to `main`, with libx264 and ffmpeg installed. The runner has no Intel GPU, so the VA-API tests skip themselves. It then runs the throughput tests for 1 and 3 displays and writes the numbers to the job summary; they measure the runner's CPU and never fail the build.
+- CI (`.github/workflows/ci.yml`, GitHub-hosted `ubuntu-24.04`) runs `make build-frontend test` on every pull request and push to `main`, with libx264 and ffmpeg installed. The runner has no Intel GPU, so the VA-API tests skip themselves. It then runs the throughput tests for 1 and 3 displays and writes the numbers to the job summary; they measure the runner's CPU and never fail the build. A second job runs the Android unit tests and the debug build.
 - Running the core by hand: `controller/bin/booth-core engine` reads JSON commands on stdin (e.g. `{"id":1,"cmd":"start","mode":"testpattern"}`) and writes framed events on stdout; `booth-core discover` lists NDI sources and `booth-core version` prints the NDI runtime version.
