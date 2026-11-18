@@ -1,0 +1,35 @@
+# booth-display を Kubernetes で動かすサンプル (TechnoTUT/Infra の k8s/manifest に置く想定)。
+# Argo CD の Application から、このディレクトリを kustomize でデプロイする:
+#
+#   apiVersion: argoproj.io/v1alpha1
+#   kind: Application
+#   metadata: { name: booth-display, namespace: argocd }
+#   spec:
+#     project: default
+#     source: { repoURL: https://github.com/TechnoTUT/Infra.git, targetRevision: HEAD, path: k8s/manifest/booth-display }
+#     destination: { server: https://kubernetes.default.svc, namespace: booth-display }
+#     syncPolicy: { automated: { prune: false, selfHeal: true }, syncOptions: [CreateNamespace=true] }
+#
+# 手元で確認するとき: kubectl kustomize deploy/k8s
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: booth-display
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+
+configMapGenerator:
+  # config.yaml の初期値。初回起動時だけ /data/config.yaml にコピーされ、以後は Web GUI の保存先 (PVC) が優先される。
+  # ここを変えて反映させたいときは、PVC の config.yaml を消して Pod を作り直す。
+  - name: booth-display-config
+    files:
+      - config.yaml
+  # NDI の設定 (NDI_CONFIG_DIR)。AV (VLAN 20) の NDI Discovery Server を使う。
+  - name: booth-display-ndi
+    files:
+      - ndi-config.v1.json
+
+patches:
+  # VA-API (Intel iGPU) でエンコードする。GPU のないノードで動かす (libx264 だけ使う) ときは、この行を消す。
+  - path: vaapi-patch.yaml

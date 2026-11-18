@@ -1,0 +1,45 @@
+# Pod が初回起動時に /data/config.yaml へコピーする初期設定。以後は Web GUI で変える (保存先は PVC)。
+# displays[].ip は実際のディスプレイのアドレスにする (192.0.2.x は例)。ディスプレイは別々の機器なので、ポートは同じ 8554 でよい。
+server:
+    http_port: 8080
+    default_stream_port: 8554
+    ws_ping_interval_sec: 5
+canvas:
+    width: 5760
+    height: 540
+    fps: 30
+displays:
+    - id: display-1
+      name: Display Left
+      ip: 192.0.2.11
+      port: 8554
+      width: 1920
+      height: 540
+      crop_x: 0
+      crop_y: 0
+      bezel_padding_right: 0
+    - id: display-2
+      name: Display Center
+      ip: 192.0.2.12
+      port: 8554
+      width: 1920
+      height: 540
+      crop_x: 1920
+      crop_y: 0
+      bezel_padding_right: 0
+    - id: display-3
+      name: Display Right
+      ip: 192.0.2.13
+      port: 8554
+      width: 1920
+      height: 540
+      crop_x: 3840
+      crop_y: 0
+      bezel_padding_right: 0
+media:
+    default_mode: testpattern
+    video_file: ""
+pipeline:
+    encoder: auto # "auto" (VA-API if the render node exists, else libx264), "vaapi", "vaapi-ffmpeg" or "software"
+    vaapi_device: /dev/dri/renderD128
+    send_rate_mbps: 0 # pacing of each display's packets in Mbps; 0 = default (80), -1 = off

@@ -1,0 +1,112 @@
+# booth-display のコントローラ (display-controller) とメディアコア (booth-core)。
+# 映像は Pod のネットワークから各ディスプレイへ UDP で送る。ディスプレイは別の VLAN にいて L3 でルーティングされる。
+# ディスプレイは映像の送信元 (ノードの IP に SNAT されたアドレスとポート) へ制御メッセージを返すので、戻りは conntrack で Pod に届く。
+# FortiGate を通る場合は、dmz (ノード) からディスプレイの VLAN への UDP (config.yaml の各ディスプレイのポート) を許可するポリシーが必要。
+# NDI の受信のため、Multus で AV (VLAN 20, br20) にもつなぐ。
+# UDP の送信元と config.yaml (PVC) を 1 つの Pod で持つので、レプリカは 1 つ (Recreate)。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booth-display
+  labels:
+    app: booth-display
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: booth-display
+  template:
+    metadata:
+      labels:
+        app: booth-display
+      annotations:
+        # net1 ではなく av という名前にする。NDI (mDNS と映像の受信) はこのインターフェースを使う
+        k8s.v1.cni.cncf.io/networks: kube-public/vlan20-bridge@av
+    spec:
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      initContainers:
+      # NDI ランタイム (libndi.so.6) はライセンスの都合でイメージに入れていない。起動のたびに公式の NDI SDK から取得して /ndi に置く。
+      # NDI_ACCEPT_LICENSE=yes は NDI SDK のライセンスに同意したことを意味する。デプロイする人が内容を確認しておくこと。
+      # WAN につながらなくても起動は止めない (NDI 入力だけが使えなくなる。テストパターン・ロゴ・動画ファイルは使える)。
+      - name: fetch-ndi
+        image: ghcr.io/technotut/booth-display:1.1.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - install-ndi-sdk.sh || echo "fetch-ndi: NDI runtime not available; NDI input is disabled"
+        env:
+        - { name: NDI_ACCEPT_LICENSE, value: "yes" }
+        - { name: NDI_LIB_DIR, value: /ndi }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - { name: ndi, mountPath: /ndi }
+        - { name: tmp, mountPath: /tmp }
+      containers:
+      - name: booth-display
+        # TechnoTUT/booth-display のタグ controller-vX.Y.Z を GitHub Actions がビルドして置く (public)。
+        # WAN が不安定なので、ノードにあるイメージを使う。更新するときは initContainers と両方のタグを変える。
+        image: ghcr.io/technotut/booth-display:1.1.0
+        imagePullPolicy: IfNotPresent
+        # 起動したら config.yaml の media.default_mode で送出を始める
+        args: ["-auto-start"]
+        env:
+        - { name: TZ, value: Asia/Tokyo }
+        - { name: NDI_RUNTIME_DIR_V6, value: /ndi }
+        - { name: NDI_CONFIG_DIR, value: /etc/ndi }
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /api/status
+            port: http
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /api/status
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 20
+        resources:
+          # libx264 で 1920x540 を 3 面送ると 1.5 コアほど使う (VA-API ならずっと少ない)。
+          # 遅延が増えるので CPU の limit は付けない。
+          requests:
+            cpu: "1"
+            memory: 256Mi
+          limits:
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        # config.yaml (Web GUI の保存先) と assets/ (動画ファイル。Web GUI の一覧に出る)
+        - { name: data, mountPath: /data }
+        - { name: ndi, mountPath: /ndi, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+        - { name: config-seed, mountPath: /etc/booth-display, readOnly: true }
+        - { name: ndi-config, mountPath: /etc/ndi, readOnly: true }
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: booth-display-data
+      - name: ndi
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      - name: config-seed
+        configMap:
+          name: booth-display-config
+      - name: ndi-config
+        configMap:
+          name: booth-display-ndi
+      restartPolicy: Always
