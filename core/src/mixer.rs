@@ -85,6 +85,17 @@ impl State {
         }
     }
 
+    /// Frame arrivals of the external source on screen (or coming in by a
+    /// transition), None when every source on screen is drawn here. Only one
+    /// external source runs at a time.
+    fn source_notifier(&self) -> Option<Receiver<()>> {
+        let shown = |s: &str| self.active_source == s || self.next_source == s;
+        if let Some(n) = self.ndi.as_ref().filter(|_| shown("ndi")) {
+            return Some(n.notifier());
+        }
+        self.ff.as_ref().filter(|_| shown("video") || shown("rainbow")).map(|f| f.notifier())
+    }
+
     fn finish_transition(&mut self) {
         self.active_source = std::mem::take(&mut self.next_source);
         self.active_target = std::mem::take(&mut self.next_target);
@@ -282,25 +293,28 @@ impl Drop for Mixer {
     }
 }
 
-/// Renders a frame whenever the NDI source delivers one, so a frame goes to
-/// the encoder the moment it arrives. The ticker paces generator sources and
-/// stands in when NDI frames stop.
+/// Renders a frame whenever an external source (NDI, or the ffmpeg process
+/// behind a video file or the rainbow test source) delivers one, so a frame
+/// goes to the encoder the moment it arrives. The ticker paces the generator
+/// sources drawn here and stands in when external frames stop.
 ///
-/// The ticker must not compete with NDI arrivals: a ticker of exactly 30 Hz
-/// beats against a 29.97 fps source, and whenever it fired just before a frame
-/// arrived it would render the old frame and push the new one back a full
-/// interval. So while NDI frames keep coming, ticks are skipped.
+/// The ticker must not compete with arrivals. A source runs on a clock of its
+/// own; sampling its latest frame on a second clock of (nearly) the same rate
+/// beats: for seconds at a time the two are in phase, and jitter then makes a
+/// tick take the same frame twice and miss the next one (measured with
+/// rainbow at 30 fps: 14 repeated frames in 20 s, in bursts). So while
+/// external frames keep coming, ticks are skipped.
 fn run(inner: &Inner, stop: Receiver<()>) {
     let interval = Duration::from_secs(1) / inner.fps;
-    // An NDI frame is rendered once 60% of an interval has passed since the
-    // last render: absorbs arrival jitter of a 30 fps source while thinning a
-    // faster source to about the canvas rate.
+    // An arriving frame is rendered once 60% of an interval has passed since
+    // the last render: absorbs arrival jitter of a source at the canvas rate
+    // while thinning a faster source to about the canvas rate.
     let min_gap = interval * 6 / 10;
-    // Ticks are skipped while the last NDI frame is more recent than this.
-    let ndi_live = interval * 3 / 2;
+    // Ticks are skipped while the last arrival is more recent than this.
+    let source_live = interval * 3 / 2;
     let ticker = tick(interval);
     let none = never();
-    let (mut last_render, mut last_ndi) = (Instant::now() - interval, Instant::now() - interval);
+    let (mut last_render, mut last_arrival) = (Instant::now() - interval, Instant::now() - interval);
 
     let render = |last_render: &mut Instant| {
         let mut buf = inner.pool.get();
@@ -316,24 +330,18 @@ fn run(inner: &Inner, stop: Receiver<()>) {
     };
 
     loop {
-        let ndi_rx = {
-            let st = inner.state.lock().unwrap();
-            match &st.ndi {
-                Some(n) if st.active_source == "ndi" || st.next_source == "ndi" => Some(n.notifier()),
-                _ => None,
-            }
-        };
-        let ndi_active = ndi_rx.is_some();
+        let arrivals = inner.state.lock().unwrap().source_notifier();
+        let external = arrivals.is_some();
         select! {
             recv(stop) -> _ => return,
-            recv(ndi_rx.as_ref().unwrap_or(&none)) -> _ => {
-                last_ndi = Instant::now();
+            recv(arrivals.as_ref().unwrap_or(&none)) -> _ => {
+                last_arrival = Instant::now();
                 if last_render.elapsed() >= min_gap {
                     render(&mut last_render);
                 }
             }
             recv(ticker) -> _ => {
-                if !(ndi_active && last_ndi.elapsed() < ndi_live) {
+                if !(external && last_arrival.elapsed() < source_live) {
                     render(&mut last_render);
                 }
             }
@@ -381,6 +389,48 @@ mod tests {
             }
         }
         assert!((12..=18).contains(&n), "got {n} frames in 0.5 s at 30 fps");
+    }
+
+    /// The mixer wakes on the frames of the external source on screen, also
+    /// while a transition brings it in, and on its ticker otherwise. Needs ffmpeg.
+    #[test]
+    fn renders_on_ffmpeg_frame_arrival() {
+        let m = Mixer::start(canvas(), &[]).unwrap();
+        let notifier = || m.inner.state.lock().unwrap().source_notifier().is_some();
+        assert!(!notifier(), "the test pattern is drawn on the ticker");
+        m.switch_source("rainbow", "", Transition::Fade, 10_000).unwrap();
+        assert!(notifier(), "a transition to rainbow follows its frames");
+        m.switch_source("rainbow", "", Transition::Cut, 0).unwrap();
+        assert!(notifier());
+        m.switch_source("logo", "", Transition::Cut, 0).unwrap();
+        assert!(!notifier());
+    }
+
+    /// Every frame ffmpeg delivers goes out exactly once. testsrc changes
+    /// every frame, so an output equal to the previous one is a repeat. The
+    /// old ticker-driven rendering repeated frames only while its clock and
+    /// ffmpeg's were in phase, so this catches that only in some runs;
+    /// renders_on_ffmpeg_frame_arrival checks the wiring. Needs ffmpeg.
+    #[test]
+    fn ffmpeg_source_frames_are_not_repeated() {
+        let c = Canvas { width: 320, height: 180, fps: 30 };
+        let m = Mixer::start(c, &[]).unwrap();
+        m.switch_source("rainbow", "", Transition::Cut, 0).unwrap();
+        let rx = m.subscribe();
+        // Skip startup, until ffmpeg delivers frames.
+        let first = rx.iter().find(|f| f.iter().any(|&b| b != 0)).unwrap();
+        let (mut prev, mut frames, mut repeats) = (first, 0, 0);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            let f = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            if f[..] == prev[..] {
+                repeats += 1;
+            }
+            prev = f;
+            frames += 1;
+        }
+        assert!(frames >= 140, "only {frames} frames in 5 s at 30 fps");
+        assert_eq!(repeats, 0, "{repeats} of {frames} frames repeated the previous one");
     }
 
     #[test]

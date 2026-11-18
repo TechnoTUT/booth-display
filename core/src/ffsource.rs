@@ -3,6 +3,7 @@
 
 use crate::config::Canvas;
 use anyhow::Context;
+use crossbeam_channel::{bounded, Receiver};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::process::{Child, Command, Stdio};
@@ -18,6 +19,7 @@ pub struct FfSource {
     child: Child,
     reader: Option<JoinHandle<()>>,
     latest: Arc<Mutex<Latest>>,
+    notify: Receiver<()>,
 }
 
 impl FfSource {
@@ -48,15 +50,25 @@ impl FfSource {
         let size = canvas.frame_size();
         let latest = Arc::new(Mutex::new(Latest { data: vec![0; size], has_frame: false }));
         let shared = latest.clone();
+        let (notify_tx, notify) = bounded(1);
         let reader = std::thread::Builder::new().name("ffmpeg-source".into()).spawn(move || {
             let mut back = vec![0u8; size];
             while stdout.read_exact(&mut back).is_ok() {
                 let mut l = shared.lock().unwrap();
                 std::mem::swap(&mut l.data, &mut back);
                 l.has_frame = true;
+                drop(l);
+                // Wakes the mixer; a pending wake-up already covers this frame.
+                let _ = notify_tx.try_send(());
             }
         })?;
-        Ok(Self { child, reader: Some(reader), latest })
+        Ok(Self { child, reader: Some(reader), latest, notify })
+    }
+
+    /// Signals every frame ffmpeg delivers, so the mixer renders on ffmpeg's
+    /// clock instead of sampling the latest frame on a clock of its own.
+    pub fn notifier(&self) -> Receiver<()> {
+        self.notify.clone()
     }
 
     /// Copies the latest frame into dst; false (dst untouched) until one arrived.
