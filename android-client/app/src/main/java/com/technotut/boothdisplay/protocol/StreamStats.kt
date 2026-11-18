@@ -49,6 +49,8 @@ class StreamStats {
         val keyframeRequestsTotal: Long,
         val backlogDropsTotal: Long,
         val rttMs: Float?,
+        val pacedTotal: Long = 0,
+        val paceResetsTotal: Long = 0,
     ) {
         private fun fmt(s: FloatArray?) =
             if (s == null) "-" else String.format(java.util.Locale.ROOT, "%.1f/%.1f/%.1f", s[0], s[1], s[2])
@@ -56,10 +58,11 @@ class StreamStats {
         /** One line for logcat: stages as median/p90/max in ms. */
         fun logLine(): String = String.format(
             java.util.Locale.ROOT,
-            "fps=%.1f e2e=%s net=%s wait=%s dec=%s stalls=%d lost=%d skipped=%d kfreq=%d backlog=%d rtt=%s",
+            "fps=%.1f e2e=%s net=%s wait=%s dec=%s stalls=%d lost=%d skipped=%d kfreq=%d backlog=%d rtt=%s paced=%d/%d",
             fps, fmt(e2e), fmt(net), fmt(wait), fmt(decode), stalls, lostTotal, skippedTotal,
             keyframeRequestsTotal, backlogDropsTotal,
             if (rttMs == null) "-" else String.format(java.util.Locale.ROOT, "%.2fms", rttMs),
+            pacedTotal, paceResetsTotal,
         )
     }
 
@@ -76,6 +79,8 @@ class StreamStats {
     private var skipped = 0L
     private var keyframeRequests = 0L
     private var backlogDrops = 0L
+    private var paced = 0L
+    private var paceResets = 0L
 
     @Synchronized
     fun frameReceived(frame: Frame) {
@@ -91,6 +96,13 @@ class StreamStats {
         if (lastOutputNs != 0L && nowNs - lastOutputNs > STALL_MS * 1_000_000L) stalls++
         lastOutputNs = nowNs
         frames++
+    }
+
+    /** Totals from the vsync pacer: pictures moved to a later vsync, and schedule restarts. */
+    @Synchronized
+    fun paced(delayedTotal: Long, resetsTotal: Long) {
+        paced = delayedTotal
+        paceResets = resetsTotal
     }
 
     @Synchronized
@@ -122,6 +134,7 @@ class StreamStats {
             fps, net.summary(), wait.summary(), decode.summary(), e2e.summary(), stalls,
             lost, skipped, keyframeRequests, backlogDrops,
             if (rttUs < 0) null else rttUs / 1e3f,
+            paced, paceResets,
         )
         net.clear(); wait.clear(); decode.clear(); e2e.clear()
         frames = 0
