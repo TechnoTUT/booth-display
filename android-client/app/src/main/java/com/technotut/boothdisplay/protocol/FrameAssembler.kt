@@ -13,12 +13,18 @@ package com.technotut.boothdisplay.protocol
  * starts first), when the sequence numbers between two frames have a gap,
  * or when a frame cannot be held. The caller then waits for a keyframe.
  *
+ * A frame starting more than [RESTART_DISTANCE] packets before the expected
+ * one is not a late fragment but a restarted sender, whose numbering began
+ * again: the assembler starts over from it and calls [onRestart]. Without
+ * this it would ignore the new stream until its numbers passed the old ones.
+ *
  * Used from the receive thread only.
  */
 class FrameAssembler(
     private val pool: FramePool,
     private val onFrame: (Frame) -> Unit,
     private val onLoss: () -> Unit,
+    private val onRestart: () -> Unit = {},
 ) {
     private var current: Frame? = null
     private var currentBase = 0L
@@ -40,7 +46,15 @@ class FrameAssembler(
         if (current == null || base != currentBase) {
             // Fragments of a frame already finished or abandoned arrive late: ignore.
             val reference = if (current != null) currentBase else expectedBase
-            if (started && seqDiff(base, reference) < 0) return
+            if (started) {
+                val behind = seqDiff(base, reference)
+                if (behind < -RESTART_DISTANCE) {
+                    reset()
+                    onRestart()
+                } else if (behind < 0) {
+                    return
+                }
+            }
 
             var lost = false
             if (current != null) {
@@ -104,6 +118,13 @@ class FrameAssembler(
     }
 
     companion object {
+        /**
+         * Packets a frame may start behind the expected one and still count
+         * as late. Reordering on a LAN is a frame or two at most (an IDR is
+         * about 90 packets); anything further back is a new stream.
+         */
+        const val RESTART_DISTANCE = 1024
+
         /** a - b for 32-bit wrapping sequence numbers: negative when a is older. */
         fun seqDiff(a: Long, b: Long): Int = (a - b).toInt()
     }

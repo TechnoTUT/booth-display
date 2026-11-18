@@ -15,6 +15,7 @@ class FrameAssemblerTest {
     private val frames = mutableListOf<ByteArray>()
     private val keyframes = mutableListOf<Boolean>()
     private var losses = 0
+    private var restarts = 0
     private val header = PacketHeader()
 
     @Before
@@ -24,7 +25,7 @@ class FrameAssemblerTest {
             frames.add(f.data.copyOf(f.size))
             keyframes.add(f.isKeyframe)
             pool.release(f)
-        }, { losses++ })
+        }, { losses++ }, { restarts++ })
     }
 
     /** Splits [au] like the controller does, numbering packets from [seq]. */
@@ -144,5 +145,33 @@ class FrameAssemblerTest {
         assembler.reset()
         assertEquals(4, pool.available)
         assertFalse(frames.isNotEmpty())
+    }
+
+    @Test
+    fun startsOverWhenTheSenderRestarts() {
+        // A long first run, then the controller restarts and numbers from 0 again.
+        packetize(au(10, 17), 100_000, keyframe = true).forEach(::feed)
+        packetize(au(10, 18), 100_001).forEach(::feed)
+        val a = au(PacketHeader.MAX_PAYLOAD * 2, 19)
+        packetize(a, 0, keyframe = true).forEach(::feed)
+        packetize(au(10, 20), 2).forEach(::feed)
+        assertEquals(4, frames.size)
+        assertArrayEquals(a, frames[2])
+        assertEquals(1, restarts)
+        assertEquals(0, losses)
+        assertEquals(4, pool.available)
+    }
+
+    @Test
+    fun stillIgnoresFragmentsLessThanTheRestartDistanceBehind() {
+        packetize(au(10, 21), 5000).forEach(::feed)
+        // The next frame is expected at 5001; exactly the restart distance behind it is still late.
+        packetize(au(10, 22), 5001L - FrameAssembler.RESTART_DISTANCE).forEach(::feed)
+        assertEquals(1, frames.size)
+        assertEquals(0, restarts)
+        // One packet further back is a new stream.
+        packetize(au(10, 23), 5000L - FrameAssembler.RESTART_DISTANCE).forEach(::feed)
+        assertEquals(2, frames.size)
+        assertEquals(1, restarts)
     }
 }
