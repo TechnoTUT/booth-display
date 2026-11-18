@@ -1,0 +1,15 @@
+# Build context for Containerfile (Podman reads this file too)
+.git
+.github
+**/target
+**/node_modules
+controller/bin
+controller/web/dist/*
+!controller/web/dist/.gitkeep
+android-client
+tools
+deploy
+docs
+*.mp4
+*.mkv
+*.mov

@@ -1,0 +1,12 @@
+# config.yaml (Web GUI で保存した設定) と assets/ (動画ファイル)。書き込むのは booth-display の Pod 1 つだけ (replicas: 1、Recreate)。
+# 動画ファイルを置くなら容量を増やす。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: booth-display-data
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: nfs-client
+  resources:
+    requests:
+      storage: 1Gi

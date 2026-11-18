@@ -1,0 +1,33 @@
+# VA-API (Intel iGPU) でエンコードするための追加分。kustomization.yaml の patches から当てる。
+# Intel GPU の device plugin は入れていないので、qlcplus (dmx) と同じく hostPath と privileged でデバイスを渡す。
+# - GPU のあるノードに置く。そのノードにラベルを付けておく: kubectl label node <ノード> booth-display/vaapi=true
+# - /dev/dri/renderD128 はノードの render グループのもの。そのグループ ID を supplementalGroups に書く
+#   (ノードで `getent group render` の 3 列目。Debian / AlmaLinux でノードごとに違うことがある)
+# - Ivy Bridge / Haswell (i965) のノードでは LIBVA_DRIVER_NAME=i965 にする。Broadwell 以降は iHD (既定) のままでよい
+# - config.yaml の pipeline.encoder は auto のままでよい。VA-API が使えなければ libx264 で送る
+# - VT-d (IOMMU) が有効だと iGPU のエンコードでノードごと固まることがある。BIOS で切る (README の Encoders を参照)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booth-display
+spec:
+  template:
+    spec:
+      nodeSelector:
+        booth-display/vaapi: "true"
+      securityContext:
+        supplementalGroups: [993]
+      containers:
+      - name: booth-display
+        env:
+        - { name: LIBVA_DRIVER_NAME, value: iHD }
+        securityContext:
+          privileged: true
+          allowPrivilegeEscalation: true
+        volumeMounts:
+        - { name: dri, mountPath: /dev/dri }
+      volumes:
+      - name: dri
+        hostPath:
+          path: /dev/dri
+          type: Directory

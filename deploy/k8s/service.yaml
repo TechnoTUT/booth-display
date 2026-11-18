@@ -1,0 +1,19 @@
+# Web GUI・API・WebSocket (/ws)・プレビュー (/api/preview/mjpeg)。
+# ディスプレイへの映像 (UDP) は Pod から送るだけなので、Service には載せない。
+apiVersion: v1
+kind: Service
+metadata:
+  name: booth-display
+  labels:
+    app: booth-display
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: booth-display.svc.technotut.net
+spec:
+  selector:
+    app: booth-display
+  type: LoadBalancer
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: http
