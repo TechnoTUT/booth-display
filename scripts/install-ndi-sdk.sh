@@ -4,10 +4,15 @@
 #
 #   scripts/install-ndi-sdk.sh            # install to /usr/local/lib (uses sudo)
 #   PREFIX=/opt/ndi scripts/install-ndi-sdk.sh
+#   NDI_LIB_DIR=/ndi scripts/install-ndi-sdk.sh   # copy only (see below)
 #
 # The SDK installer shows the NDI SDK license and asks you to accept it. Set
 # NDI_ACCEPT_LICENSE=yes only if you have read and accepted it already (e.g.
 # when provisioning more machines).
+#
+# NDI_LIB_DIR=<dir> only copies libndi.so* into <dir>: no sudo, no ldconfig.
+# Point booth-core at it with NDI_RUNTIME_DIR_V6=<dir>. The container image's
+# init container uses this (deploy/k8s).
 #
 # Based on DistroAV's CI/libndi-get.sh. Unlike that script it registers the
 # library directory with the dynamic linker when needed: Fedora/RHEL do not
@@ -26,7 +31,7 @@ if [[ "$(uname -m)" != "x86_64" ]]; then
 fi
 
 SUDO=""
-if [[ $EUID -ne 0 ]]; then
+if [[ -z "${NDI_LIB_DIR:-}" && $EUID -ne 0 ]]; then
     SUDO="sudo"
 fi
 
@@ -52,6 +57,14 @@ SRC="$TMP/NDI SDK for Linux/lib/$ARCH_DIR"
 if ! ls "$SRC"/libndi.so.6* >/dev/null 2>&1; then
     echo "libndi.so.6 not found in the SDK (license not accepted?)" >&2
     exit 1
+fi
+
+if [[ -n "${NDI_LIB_DIR:-}" ]]; then
+    mkdir -p "$NDI_LIB_DIR"
+    cp -P "$SRC"/libndi.so* "$NDI_LIB_DIR"/
+    echo "Copied: $(ls "$NDI_LIB_DIR"/libndi.so* | xargs)"
+    strings "$NDI_LIB_DIR/libndi.so.6" 2>/dev/null | grep -m1 '^NDI SDK LINUX' || true
+    exit 0
 fi
 
 echo "Installing libndi to $LIBDIR ..."
