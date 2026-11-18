@@ -34,7 +34,7 @@ spec:
       # NDI_ACCEPT_LICENSE=yes は NDI SDK のライセンスに同意したことを意味する。デプロイする人が内容を確認しておくこと。
       # WAN につながらなくても起動は止めない (NDI 入力だけが使えなくなる。テストパターン・ロゴ・動画ファイルは使える)。
       - name: fetch-ndi
-        image: ghcr.io/technotut/booth-display:1.1.1
+        image: ghcr.io/technotut/booth-display:1.1.2
         imagePullPolicy: IfNotPresent
         command:
         - sh
@@ -54,7 +54,7 @@ spec:
       - name: booth-display
         # TechnoTUT/booth-display のタグ controller-vX.Y.Z を GitHub Actions がビルドして置く (public)。
         # WAN が不安定なので、ノードにあるイメージを使う。更新するときは initContainers と両方のタグを変える。
-        image: ghcr.io/technotut/booth-display:1.1.1
+        image: ghcr.io/technotut/booth-display:1.1.2
         imagePullPolicy: IfNotPresent
         # 起動したら config.yaml の media.default_mode で送出を始める
         args: ["-auto-start"]
