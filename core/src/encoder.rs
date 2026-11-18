@@ -24,7 +24,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How long a freshly started ffmpeg must keep running to count as healthy.
 /// An encoder that cannot open its device (e.g. VA-API) exits within a few
@@ -319,6 +319,7 @@ impl Drop for Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     fn displays() -> Vec<DisplayConfig> {
         (0..3)
