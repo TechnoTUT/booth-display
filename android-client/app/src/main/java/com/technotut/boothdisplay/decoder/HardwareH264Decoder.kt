@@ -42,6 +42,9 @@ class HardwareH264Decoder(
         /** Decode-speed hint: well above 30 fps so the codec runs at full clock. */
         private const val OPERATING_RATE = 120
 
+        /** Rockchip vendor key (their libstagefright) for immediate decoder output. */
+        private const val KEY_RK_IMMEDIATE_OUT = "rk-immediate-out"
+
         /** Frames in flight inside the codec that can be traced back. */
         private const val META_SLOTS = 32
     }
@@ -211,6 +214,12 @@ class HardwareH264Decoder(
 
     private fun format(w: Int, h: Int, hints: Boolean) = MediaFormat.createVideoFormat(MIME_TYPE, w, h).apply {
         setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, pool.frameCapacity)
+        // Rockchip's decoder otherwise holds each IDR and the frame after it
+        // until the next input arrives (measured: +30 ms each at 30 fps, every
+        // keyframe). This vendor key turns on its immediate output mode
+        // (VPU_API_SET_IMMEDIATE_OUT); other codecs ignore unknown keys. Set in
+        // every attempt, since the fallbacks need it just as much.
+        setInteger(KEY_RK_IMMEDIATE_OUT, 1)
         if (!hints) return@apply
         // Realtime priority and a high operating rate keep the codec clocked up.
         setInteger(MediaFormat.KEY_PRIORITY, 0)
