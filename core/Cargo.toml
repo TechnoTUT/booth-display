@@ -1,6 +1,6 @@
 [package]
 name = "booth-core"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 license = "MIT"
 description = "booth-display media core: NDI input, canvas mixer, per-display H.264 encoding and UDP streaming"
