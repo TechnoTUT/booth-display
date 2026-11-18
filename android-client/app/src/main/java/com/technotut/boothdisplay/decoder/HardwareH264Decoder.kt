@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import android.util.Log
+import android.view.Choreographer
 import android.view.Surface
 import com.technotut.boothdisplay.protocol.ClockSync
 import com.technotut.boothdisplay.protocol.Frame
@@ -21,6 +22,11 @@ import com.technotut.boothdisplay.protocol.StreamStats
  * callbacks run on their own thread: an access unit goes into the first free
  * input buffer, and every decoded picture is rendered the moment it comes
  * out. Nothing waits with a timeout or polls.
+ *
+ * Each picture is rendered at the vsync it would get anyway, unless the
+ * previous picture already has that vsync; then it goes to the next one
+ * ([VsyncPacer]). Without this SurfaceFlinger drops one of two pictures
+ * that arrive within one refresh, about a fifth of them at 60 fps.
  *
  * At most [MAX_PENDING] access units wait for an input buffer. Beyond that
  * the decoder is falling behind, so the waiting ones are discarded and the
@@ -44,6 +50,10 @@ class HardwareH264Decoder(
 
         /** Rockchip vendor key (their libstagefright) for immediate decoder output. */
         private const val KEY_RK_IMMEDIATE_OUT = "rk-immediate-out"
+
+        /** Plausible refresh periods (30 to 120 Hz) for the vsync estimate. */
+        private const val MIN_PERIOD_NS = 8_000_000L
+        private const val MAX_PERIOD_NS = 34_000_000L
 
         /** Frames in flight inside the codec that can be traced back. */
         private const val META_SLOTS = 32
@@ -73,10 +83,38 @@ class HardwareH264Decoder(
      * belongs to the callback thread; a session that is no longer current
      * does nothing, so a stopping codec cannot touch its successor.
      */
-    private inner class Session(val codec: MediaCodec) : MediaCodec.Callback() {
+    private inner class Session(val codec: MediaCodec) : MediaCodec.Callback(), Choreographer.FrameCallback {
         val thread = HandlerThread("DecoderCallbacks", Process.THREAD_PRIORITY_URGENT_DISPLAY).apply { start() }
         val handler = Handler(thread.looper)
         val feedRunnable = Runnable { feed() }
+
+        // Vsync tracking, on the callback thread like the codec callbacks.
+        private val pacer = VsyncPacer()
+        private var choreographer: Choreographer? = null
+        private var lastFrameTimeNs = 0L
+        private var periodNs = 0L
+        @Volatile
+        private var stopped = false
+
+        fun startVsync() {
+            handler.post {
+                choreographer = Choreographer.getInstance().also { it.postFrameCallback(this) }
+            }
+        }
+
+        override fun doFrame(frameTimeNanos: Long) {
+            if (stopped) return
+            val d = frameTimeNanos - lastFrameTimeNs
+            // Consecutive callbacks are one refresh apart; a missed one shows
+            // as a longer gap, so keep the shortest plausible interval, eased
+            // towards new readings to follow small drifts.
+            if (lastFrameTimeNs > 0 && d in MIN_PERIOD_NS..MAX_PERIOD_NS) {
+                periodNs = if (periodNs == 0L || d < periodNs) d else periodNs + (d - periodNs) / 64
+            }
+            lastFrameTimeNs = frameTimeNanos
+            if (periodNs > 0) pacer.onVsync(frameTimeNanos, periodNs)
+            choreographer?.postFrameCallback(this)
+        }
 
         private val freeInputs = ArrayDeque<Int>(16)
         private val metaPts = LongArray(META_SLOTS) { -1L }
@@ -94,7 +132,12 @@ class HardwareH264Decoder(
         override fun onOutputBufferAvailable(mc: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
             val now = System.nanoTime()
             try {
-                mc.releaseOutputBuffer(index, true)
+                if (pacer.hasVsync) {
+                    mc.releaseOutputBuffer(index, pacer.presentTime(now))
+                } else {
+                    mc.releaseOutputBuffer(index, true)
+                }
+                stats.paced(pacer.delayed, pacer.resets)
             } catch (e: IllegalStateException) {
                 return // released while stopping
             }
@@ -155,6 +198,7 @@ class HardwareH264Decoder(
         }
 
         fun release() {
+            stopped = true
             try {
                 codec.stop()
             } catch (e: Exception) {
@@ -176,6 +220,7 @@ class HardwareH264Decoder(
                 renderedFrameCount = 0L
                 lastError = null
                 s.codec.start()
+                s.startVsync()
                 Log.i(TAG, "Decoder started: $description")
             } catch (e: Exception) {
                 lastError = "Codec init fail: ${e.message}"
