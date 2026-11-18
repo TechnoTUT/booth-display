@@ -101,6 +101,7 @@ The display sends control messages from the UDP socket it receives video on (the
 
 - Reassembly: a frame is identified by the sequence number of its first fragment (Sequence Number − Fragment Index). Fragments of the current frame may arrive in any order; a fragment of an older frame is ignored.
 - Loss: when a frame cannot be completed (a later frame starts first) or the sequence numbers between two frames have a gap, a reference picture is missing. The display then skips frames up to the next keyframe and sends KEYFRAME_REQUEST. Without the request it would wait for the next regular IDR (once a second).
+- Controller restart: a restarted controller numbers its packets from 0 again, timestamps them on a clock with a new origin, and sends from a new source port. When video arrives from a different source address or port than before, or a frame starts more than 1024 packets before the expected sequence number, the display starts over: it discards the frame being assembled and its clock offset, waits for a keyframe, sends KEYFRAME_REQUEST and PING right away. Otherwise it would take the new stream for late fragments until its numbers passed the old ones.
 - No backlog: frames go to the decoder as soon as they are complete. When the decoder falls a few frames behind, the waiting frames are discarded and the display waits for (and asks for) a keyframe, instead of showing the picture later and later.
 
 ### (5) Rules for the controller
